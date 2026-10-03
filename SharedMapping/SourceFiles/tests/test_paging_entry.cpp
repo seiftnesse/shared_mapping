@@ -54,4 +54,19 @@ TEST(PagingEntry, FlagsDoNotAffectPhys) {
     }
 }
 
+// CR3 (sec. 5.5.2) and the paging entries (Tables 5-15..5-20) place the
+// physical address in the same bits 51:12, per two different tables.
+TEST(PagingEntry, Cr3PhysMaskMatchesEntryPhysMask) {
+    EXPECT_EQ(SM_CR3_PHYS_MASK, SM_ENTRY_PHYS_MASK);
+}
+
+// A raw DTB may carry a PCID in bits 11:0; it must be stripped before the
+// value is used as a physical address.
+TEST(Pml4, Cr3ToPhysStripsPcid) {
+    const uint64_t dtb = 0x0000'01A2'B000'0000ull | 0x1ADu  // PCID
+                         | SM_CR3_NOFLUSH;
+    EXPECT_EQ(SmCr3ToPhys(dtb), 0x0000'01A2'B000'0000ull);
+    EXPECT_EQ(SmCr3ToPhys(0), 0u);
+}
+
 }  // namespace

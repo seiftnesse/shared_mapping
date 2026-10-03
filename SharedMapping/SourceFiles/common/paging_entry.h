@@ -15,11 +15,7 @@
 #ifndef PAGING_ENTRY_H_
 #define PAGING_ENTRY_H_
 
-#ifdef __cplusplus
-#include <cstdint>
-#else
 #include <stdint.h>
-#endif
 
 #include "pml4.h"
 
@@ -78,7 +74,7 @@ static inline int SmEntryUserAccessible(uint64_t entry) {
 }
 
 static inline int SmEntryWritable(uint64_t entry) {
-  return (entry & SM_ENTRY_RW) != 0;
+    return (entry & SM_ENTRY_RW) != 0;
 }
 
 #endif  // PAGING_ENTRY_H_

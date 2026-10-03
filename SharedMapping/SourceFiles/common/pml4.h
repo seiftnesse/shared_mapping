@@ -1,6 +1,3 @@
-// Pure address-translation math shared by the driver, the client and the
-// tests. Must stay free of any Windows/kernel headers.
-//
 // Sources for the layout facts used here (verified against SDM revision
 // 093, document 325462-093):
 //  - Intel SDM Vol. 3A, sec. 5.5.4 "Linear-Address Translation with 4-Level
@@ -14,11 +11,7 @@
 #ifndef PML4_H_
 #define PML4_H_
 
-#ifdef __cplusplus
-#include <cstdint>
-#else
 #include <stdint.h>
-#endif
 
 // Slot geometry per SDM Vol. 3A sec. 5.5.4 (Table 5-15: a PML4E controls a
 // 512-GByte region, selected by VA bits 47:39; 512 entries per table):
@@ -28,6 +21,26 @@
 #define SM_USER_SLOT_COUNT 256u
 #define SM_SLOT_SHIFT 39u
 #define SM_SLOT_SIZE (1ull << SM_SLOT_SHIFT)
+
+// 4-level paging only: with 5-level paging enabled (CR4.LA57, reported by
+// CPUID.(EAX=7, ECX=0):ECX[16]) VA bits 52:48 select a PML5E and the user
+// half outgrows 256 slots, invalidating the constants above. The driver
+// must check LA57 before attaching and refuse otherwise.
+
+// CR3 (a.k.a. DTB, KPROCESS.DirectoryTableBase) layout for 4-/5-level
+// paging (SDM Vol. 3A sec. 5.5.2, p. 5-21): bits 51:12 hold the physical
+// address of the PML4 (PML5) table. With CR4.PCIDE = 1 (bit 17), bits 11:0
+// hold the PCID (sec. 5.10.1), and bit 63 of a mov-to-CR3 source operand is
+// NOFLUSH: a plain CR3 reload (NOFLUSH = 0) invalidates only the current
+// PCID's non-global TLB entries (sec. 5.10.4.1).
+#define SM_CR3_PHYS_MASK 0x000FFFFFFFFFF000ull
+#define SM_CR3_PCID_MASK 0xFFFull
+#define SM_CR3_NOFLUSH (1ull << 63)
+
+// Returns the PML4-slot-aligned CR3 page address of a raw DTB read.
+static inline uint64_t SmCr3ToPhys(uint64_t dtb) {
+    return dtb & SM_CR3_PHYS_MASK;
+}
 
 // Returns the PML4 slot index (VA bits 47:39) of `va`.
 static inline uint32_t SmPml4Index(uint64_t va) {

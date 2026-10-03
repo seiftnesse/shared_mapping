@@ -1,0 +1,10 @@
+// GENERATED from SourceFiles/common/kernel_offsets.csv by the
+// generate_kernel_offsets build task -- do not edit; edit the CSV instead.
+
+#ifndef KERNEL_OFFSETS_TABLE_GEN_H_
+#define KERNEL_OFFSETS_TABLE_GEN_H_
+
+static const SM_KERNEL_OFFSETS SM_KernelOffsetTable[] = {
+@SM_OFFSET_ROWS@};
+
+#endif  // KERNEL_OFFSETS_TABLE_GEN_H_
