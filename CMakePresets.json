@@ -1,0 +1,35 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "clang-base",
+      "hidden": true,
+      "description": "Stock LLVM clang-cl.exe + Ninja",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/clang-cl-windows-toolchain.cmake",
+      "cacheVariables": {
+        "BUILD_UM": "ON",
+        "BUILD_KM": "ON"
+      }
+    },
+    {
+      "name": "clang-debug",
+      "displayName": "clang-cl (Debug)",
+      "inherits": "clang-base",
+      "binaryDir": "${sourceDir}/build/clang-debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "clang-release",
+      "displayName": "clang-cl (Release)",
+      "inherits": "clang-base",
+      "binaryDir": "${sourceDir}/build/clang-release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "clang-debug",   "configurePreset": "clang-debug" },
+    { "name": "clang-release", "configurePreset": "clang-release" }
+  ]
+}
