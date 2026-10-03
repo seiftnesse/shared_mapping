@@ -5,6 +5,10 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/SharedMapping/ThirdPa
 
 include(cmake/options.cmake)
 
+if(BUILD_TESTS)
+    enable_testing()
+endif()
+
 if(BUILD_KM)
     find_package(Wdk REQUIRED)
 endif()

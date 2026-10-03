@@ -10,7 +10,8 @@
       "toolchainFile": "${sourceDir}/cmake/clang-cl-windows-toolchain.cmake",
       "cacheVariables": {
         "BUILD_UM": "ON",
-        "BUILD_KM": "ON"
+        "BUILD_KM": "ON",
+        "BUILD_TESTS": "ON"
       }
     },
     {
@@ -29,6 +30,10 @@
     }
   ],
   "buildPresets": [
+    { "name": "clang-debug",   "configurePreset": "clang-debug" },
+    { "name": "clang-release", "configurePreset": "clang-release" }
+  ],
+  "testPresets": [
     { "name": "clang-debug",   "configurePreset": "clang-debug" },
     { "name": "clang-release", "configurePreset": "clang-release" }
   ]

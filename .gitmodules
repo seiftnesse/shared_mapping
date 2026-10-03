@@ -1,3 +1,6 @@
 [submodule "SharedMapping/ThirdParty/FindWDK"]
 	path = SharedMapping/ThirdParty/FindWDK
 	url = https://github.com/seiftnesse/FindWDK.git
+[submodule "SharedMapping/ThirdParty/googletest"]
+	path = SharedMapping/ThirdParty/googletest
+	url = https://github.com/google/googletest.git
