@@ -23,13 +23,15 @@ typedef struct SM_KERNEL_OFFSETS {
 
 static inline const SM_KERNEL_OFFSETS* SmFindKernelOffsets(uint32_t os_build,
                                                            uint32_t ubr) {
-    for (const auto & i : SM_KernelOffsetTable) {
-        if (i.OsBuild == os_build &&
-            i.Ubr == ubr) {
-            return &i;
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(SM_KernelOffsetTable) /
+                                        sizeof(SM_KernelOffsetTable[0]));
+         ++i) {
+        if (SM_KernelOffsetTable[i].OsBuild == os_build &&
+            SM_KernelOffsetTable[i].Ubr == ubr) {
+            return &SM_KernelOffsetTable[i];
         }
     }
-    return nullptr;
+    return 0;
 }
 
 #endif  // KERNEL_OFFSETS_H_

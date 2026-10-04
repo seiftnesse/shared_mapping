@@ -22,10 +22,12 @@
 #define SM_SLOT_SHIFT 39u
 #define SM_SLOT_SIZE (1ull << SM_SLOT_SHIFT)
 
-// 4-level paging only: with 5-level paging enabled (CR4.LA57, reported by
-// CPUID.(EAX=7, ECX=0):ECX[16]) VA bits 52:48 select a PML5E and the user
-// half outgrows 256 slots, invalidating the constants above. The driver
-// must check LA57 before attaching and refuse otherwise.
+// 4-level paging only: with 5-level paging enabled (CPUID.(EAX=7, ECX=0)
+// :ECX[16]; "CR4.LA57 ... (bit 12 of CR4)", SDM Vol. 3A sec. 2.5) VA bits
+// 52:48 select a PML5E and the user half outgrows 256 slots, invalidating
+// the constants above. The driver must check LA57 before attaching and
+// refuse otherwise.
+#define SM_CR4_LA57 (1ull << 12)
 
 // CR3 (a.k.a. DTB, KPROCESS.DirectoryTableBase) layout for 4-/5-level
 // paging (SDM Vol. 3A sec. 5.5.2, p. 5-21): bits 51:12 hold the physical

@@ -1,11 +1,12 @@
 #ifndef DRIVER_PROTOCOL_H_
 #define DRIVER_PROTOCOL_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "pml4.h"
 
-#ifndef _KERNEL_MODE
+#ifndef SM_KERNEL
 #include <windows.h>
 #include <winioctl.h>
 #endif

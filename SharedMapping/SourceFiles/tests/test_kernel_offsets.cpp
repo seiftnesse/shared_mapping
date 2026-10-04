@@ -4,11 +4,13 @@
 
 namespace {
 
-// Pins the known row so the CSV, the generated table and this test cannot
-// drift apart silently
+// Pins the known rows so the CSV, the generated table and this test cannot
+// drift apart silently. Both UBRs run the same ntoskrnl image.
 TEST(KernelOffsets, KnownHostRowMatchesPdb) {
     const SM_KERNEL_OFFSETS* row = SmFindKernelOffsets(19045u, 6466u);
     ASSERT_NE(row, nullptr);
+    const SM_KERNEL_OFFSETS* row2 = SmFindKernelOffsets(19045u, 6456u);
+    ASSERT_NE(row2, nullptr);
     EXPECT_EQ(row->DirectoryTableBaseOffset, 0x28u);
     EXPECT_EQ(row->UserDirectoryTableBaseOffset, 0x388u);
     EXPECT_EQ(row->KprocessSize, 0x438u);
