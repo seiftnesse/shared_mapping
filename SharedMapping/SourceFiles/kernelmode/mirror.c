@@ -1,4 +1,6 @@
+#include <ia32intrin.h>
 #include <intrin.h>
+#include <ntifs.h>
 
 #include "common/paging_entry.h"
 #include "common/pml4.h"
@@ -21,6 +23,16 @@ typedef struct {
 
 static MIRROR_STATE g_Mirror;
 static const SM_KERNEL_OFFSETS* g_Offsets;
+
+// clang-cl has no MSVC __stac/__clac intrinsics; the instructions are the
+// documented SMAP toggles (SDM Vol. 2A: STAC/CLAC).
+static __inline VOID SmStac(VOID) {
+    __asm__ volatile("stac" ::: "memory");
+}
+
+static __inline VOID SmClac(VOID) {
+    __asm__ volatile("clac" ::: "memory");
+}
 
 static BOOLEAN PhysInRam(UINT64 Phys) {
     PPHYSICAL_MEMORY_RANGE ranges = MmGetPhysicalMemoryRanges();
@@ -183,6 +195,63 @@ NTSTATUS SmMirrorDetach(VOID) {
     }
     ExReleaseFastMutex(&g_Mirror.Lock);
     return STATUS_SUCCESS;
+}
+
+// Faults in [Address, Address+Size) of the target by touching every page
+// while attached to it: page faults resolve against the target's VAD tree
+// (P3), after which the pages are valid for both processes (shared PTEs).
+// CR4.SMAP blocks supervisor reads of user pages unless EFLAGS.AC is set
+// (SDM Vol. 3A sec. 5.6), so AC is raised around the probes only when the
+// kernel did not enter with it already set.
+NTSTATUS SmMirrorWarmup(const SM_WARMUP_IN* In) {
+    if (In == NULL || In->Size == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    // User half only (128 TiB); reject kernel-space addresses outright.
+    if (In->Address >= SM_SLOT_SIZE * SM_USER_SLOT_COUNT) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ExAcquireFastMutex(&g_Mirror.Lock);
+    if (!g_Mirror.Attached || g_Mirror.TargetProcess == NULL) {
+        ExReleaseFastMutex(&g_Mirror.Lock);
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+    PEPROCESS target = g_Mirror.TargetProcess;
+    ObReferenceObject(target);
+    ExReleaseFastMutex(&g_Mirror.Lock);
+
+    KAPC_STATE apcState;
+    KeStackAttachProcess(target, &apcState);
+
+    const BOOLEAN acWasSet = (__readeflags() & 0x40000) != 0;  // EFLAGS.AC
+    if (!acWasSet) {
+        SmStac();
+    }
+
+    NTSTATUS st = STATUS_SUCCESS;
+    ULONG pages = 0;
+    UINT64 addr = In->Address & ~0xFFFull;
+    UINT64 end = In->Address + In->Size;
+    __try {
+        for (; addr < end; addr += PAGE_SIZE) {
+            volatile UINT8 probe = *(volatile UINT8*)addr;
+            (void)probe;
+            ++pages;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Not mapped even for the target (or a kernel-mode LASS stop).
+        st = GetExceptionCode();
+    }
+
+    if (!acWasSet) {
+        SmClac();
+    }
+    KeUnstackDetachProcess(&apcState);
+    ObDereferenceObject(target);
+
+    SM_LOG("warmup: pages=%u st=0x%lx", pages, (ULONG)st);
+    return st;
 }
 
 NTSTATUS SmMirrorGetInfo(SM_INFO_OUT* Out) {

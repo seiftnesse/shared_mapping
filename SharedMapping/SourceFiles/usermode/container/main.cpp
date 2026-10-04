@@ -1,12 +1,30 @@
-#include <cstdio>
 #include <windows.h>
 #include <winioctl.h>
+#include <cstdio>
 #include <cstring>
 
 #include "common/driver_protocol.h"
 #include "common/pml4.h"
 
-static BOOL AttachAndPrint(ULONG pid) {
+static BOOL Warmup(HANDLE device, unsigned long long va,
+                   unsigned long long bytes) {
+    SM_WARMUP_IN in;
+    DWORD returned = 0;
+    memset(&in, 0, sizeof(in));
+    in.Address = va;
+    in.Size = (uint32_t)bytes;
+    if (!DeviceIoControl(device, IOCTL_SM_WARMUP, &in, sizeof(in), nullptr, 0,
+                         &returned, 0)) {
+        wprintf(L"warmup 0x%llx+%llu failed: %lu\n", va, bytes, GetLastError());
+        return FALSE;
+    }
+    wprintf(L"warmup 0x%llx+%llu: OK (pages faulted in via the target VAD)\n",
+            va, bytes);
+    return TRUE;
+}
+
+static BOOL AttachAndPrint(ULONG pid, unsigned long long warmupVa,
+                           unsigned long long warmupBytes) {
     SM_ATTACH_IN in;
     SM_ATTACH_OUT out;
     DWORD returned = 0;
@@ -48,6 +66,10 @@ static BOOL AttachAndPrint(ULONG pid) {
             i, out.Windows[i].TargetSlot, out.Windows[i].ContainerSlot, delta);
     }
 
+    if (warmupVa != 0 && warmupBytes != 0) {
+        Warmup(device, warmupVa, warmupBytes);
+    }
+
     DeviceIoControl(device, IOCTL_SM_DETACH, nullptr, 0, nullptr, 0, &returned,
                     nullptr);
     CloseHandle(device);
@@ -56,15 +78,23 @@ static BOOL AttachAndPrint(ULONG pid) {
 
 int wmain(int argc, wchar_t** argv) {
     ULONG pid = 0;
+    unsigned long long warmupVa = 0;
+    unsigned long long warmupBytes = 0;
 
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"--pid") == 0 && i + 1 < argc) {
             pid = (ULONG)wcstoul(argv[++i], nullptr, 0);
+        } else if (wcscmp(argv[i], L"--warmup") == 0 && i + 1 < argc) {
+            // hex VA, decimal byte count: --warmup 0x1EAA5320000 4096
+            warmupVa = _wcstoui64(argv[++i], nullptr, 16);
+            if (i + 1 < argc) {
+                warmupBytes = _wcstoui64(argv[++i], nullptr, 10);
+            }
         }
     }
     if (pid == 0) {
-        wprintf(L"usage: container --pid <pid>\n");
+        wprintf(L"usage: container --pid <pid> [--warmup <hex-va> <bytes>]\n");
         return 2;
     }
-    return AttachAndPrint(pid) ? 0 : 1;
+    return AttachAndPrint(pid, warmupVa, warmupBytes) ? 0 : 1;
 }

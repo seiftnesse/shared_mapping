@@ -1,5 +1,6 @@
 // Target process: owns a marker buffer; the container mirrors its address
-// space. Commands: [p] print buffer, [t] trim working set, [q] quit.
+// space. Commands: [p] print buffer, [t] trim working set, [a] auto-trim
+// 20x1s (stress window for warmup runs), [q] quit.
 
 #include <stdio.h>
 #include <windows.h>
@@ -23,7 +24,9 @@ int main(void) {
     printf("SM_TARGET_READY pid=%lu buffer=%p\n", GetCurrentProcessId(),
            (void*)g_buffer);
     printf("marker: %s\n", g_buffer);
-    printf("commands: [p] print  [t] trim working set  [q] quit\n");
+    printf(
+        "commands: [p] print  [t] trim working set  [a] auto-trim 20x  "
+        "[q] quit\n");
     fflush(stdout);
 
     for (;;) {
@@ -36,6 +39,14 @@ int main(void) {
                 printf("working set trimmed\n");
             } else {
                 printf("trim failed: %lu\n", GetLastError());
+            }
+        } else if (c == 'a') {
+            for (int i = 0; i < 20; ++i) {
+                SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1,
+                                         (SIZE_T)-1);
+                printf("trim %d/20\n", i + 1);
+                fflush(stdout);
+                Sleep(1000);
             }
         } else if (c == 'q') {
             break;

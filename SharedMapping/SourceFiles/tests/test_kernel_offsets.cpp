@@ -17,6 +17,7 @@ TEST(KernelOffsets, KnownHostRowMatchesPdb) {
     EXPECT_EQ(row->MmpfnElementSize, 0x30u);
     EXPECT_EQ(row->MmpfnShareCountOffset, 0x18u);
     EXPECT_EQ(row->MmpfnShareCountShift, 2u);
+    EXPECT_EQ(row->MmPfnDatabasePointerRva, 0xcfc510u);
 }
 
 TEST(KernelOffsets, UnknownBuildIsRejected) {
@@ -33,13 +34,15 @@ TEST(KernelOffsets, RowsAreSane) {
         const auto& [OsBuild, Ubr, DirectoryTableBaseOffset,
                      UserDirectoryTableBaseOffset, KprocessSize,
                      MmpfnElementSize, MmpfnShareCountOffset,
-                     MmpfnShareCountShift] = SM_KernelOffsetTable[i];
+                     MmpfnShareCountShift, MmPfnDatabasePointerRva] =
+            SM_KernelOffsetTable[i];
         EXPECT_LT(DirectoryTableBaseOffset, KprocessSize);
         EXPECT_LT(UserDirectoryTableBaseOffset, KprocessSize);
         EXPECT_EQ(DirectoryTableBaseOffset % 8u, 0u);
         EXPECT_EQ(UserDirectoryTableBaseOffset % 8u, 0u);
         EXPECT_LT(MmpfnShareCountOffset, MmpfnElementSize);
         EXPECT_LT(MmpfnShareCountShift, 64u);
+        EXPECT_GT(MmPfnDatabasePointerRva, 0u);
         for (uint32_t j = i + 1; j < count; ++j) {
             EXPECT_FALSE(SM_KernelOffsetTable[j].OsBuild == OsBuild &&
                          SM_KernelOffsetTable[j].Ubr == Ubr)

@@ -114,7 +114,12 @@ NTSTATUS SmIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
             break;
 
         case IOCTL_SM_WARMUP:
-            st = STATUS_NOT_IMPLEMENTED;
+            if (io->Parameters.DeviceIoControl.InputBufferLength <
+                sizeof(SM_WARMUP_IN)) {
+                st = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+            st = SmMirrorWarmup((SM_WARMUP_IN*)buffer);
             break;
 
         default:

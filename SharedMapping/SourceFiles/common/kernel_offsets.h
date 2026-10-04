@@ -17,6 +17,9 @@ typedef struct SM_KERNEL_OFFSETS {
     // The share count occupies the bits at and above this shift within the
     // packed field (bits 63:2 => shift 2 on the 19041 line).
     uint32_t MmpfnShareCountShift;
+    // RVA of the MmPfnDatabase pointer variable (ntoskrnl PDB publics;
+    // PDB section map compresses away the zero-size Pad sections).
+    uint32_t MmPfnDatabasePointerRva;
 } SM_KERNEL_OFFSETS;
 
 #include "kernel_offsets_table.gen.h"
