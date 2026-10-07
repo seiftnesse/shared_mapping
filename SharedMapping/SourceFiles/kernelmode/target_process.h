@@ -8,6 +8,11 @@ NTSTATUS SmLookupTargetProcess(ULONG Pid, PEPROCESS* Process);
 
 VOID SmReleaseTargetProcess(PEPROCESS Process);
 
+// KVA-shadow marker bits (IDA, 19041): DTB bit 1 is the SwapContext
+// shadow-path marker, AddressPolicy bit 0 the per-CPU bookkeeping one.
+#define SM_DTB_KERNEL_SHADOW (1ull << 1)
+#define SM_DTB_USER_SHADOW (1ull << 0)
+
 // Reads DirectoryTableBase / UserDirectoryTableBase through the per-build
 // offset table. The user DTB is 0 when KVA shadow is off for the process.
 VOID SmReadTargetDtbs(PEPROCESS Process, const SM_KERNEL_OFFSETS* Offsets,

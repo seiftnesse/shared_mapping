@@ -133,8 +133,9 @@ static BOOL RunMirror(HANDLE device, SM_ATTACH_OUT* out, unsigned long long va,
 }
 
 static BOOL AttachAndRun(ULONG pid, unsigned long long va,
+                         unsigned long long pinLength,
                          unsigned long long warmupBytes, BOOL doWrite,
-                         unsigned long long bench) {
+                         unsigned long long bench, BOOL doHold) {
     SM_ATTACH_IN in;
     SM_ATTACH_OUT out;
     DWORD returned = 0;
@@ -152,6 +153,7 @@ static BOOL AttachAndRun(ULONG pid, unsigned long long va,
     memset(&out, 0, sizeof(out));
     in.TargetPid = pid;
     in.TargetVa = va;
+    in.TargetLength = (uint32_t)pinLength;
     if (!DeviceIoControl(device, IOCTL_SM_ATTACH, &in, sizeof(in), &out,
                          sizeof(out), &returned, 0)) {
         wprintf(L"IOCTL_SM_ATTACH failed: %lu\n", GetLastError());
@@ -179,13 +181,22 @@ static BOOL AttachAndRun(ULONG pid, unsigned long long va,
 
     if (out.Flags & SM_FLAG_WRITE_ENABLED) {
         if (va != 0) {
-            Warmup(device, va, warmupBytes);
+            if (warmupBytes != 0) {
+                Warmup(device, va, warmupBytes);
+            }
             RunMirror(device, &out, va, doWrite, bench);
         } else {
             wprintf(L"write build active but no --va given: plan only\n");
         }
     } else if (va != 0 && warmupBytes != 0) {
         Warmup(device, va, warmupBytes);
+    }
+
+    if (doHold) {
+        wprintf(
+            L"mirror live -- exit/kill the target now, then press Enter "
+            L"to detach\n");
+        getchar();
     }
 
     DeviceIoControl(device, IOCTL_SM_DETACH, nullptr, 0, nullptr, 0, &returned,
@@ -196,15 +207,17 @@ static BOOL AttachAndRun(ULONG pid, unsigned long long va,
 }
 
 int wmain(int argc, wchar_t** argv) {
-    setvbuf(stdout, nullptr, _IONBF, 0);  // survive crashes: no lost output
+    setvbuf(stdout, nullptr, _IONBF, 0);
     setvbuf(stderr, nullptr, _IONBF, 0);
     AddVectoredExceptionHandler(1, SmVectoredLogger);
     wprintf(L"client pid=%lu\n", GetCurrentProcessId());
     ULONG pid = 0;
     unsigned long long va = 0;
-    unsigned long long warmupBytes = 4096;
+    unsigned long long warmupBytes = 0;
+    unsigned long long pinLength = 4096;
     unsigned long long bench = 0;
     BOOL doWrite = FALSE;
+    BOOL doHold = FALSE;
 
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"--pid") == 0 && i + 1 < argc) {
@@ -217,13 +230,19 @@ int wmain(int argc, wchar_t** argv) {
             bench = _wcstoui64(argv[++i], nullptr, 10);
         } else if (wcscmp(argv[i], L"--warmup") == 0 && i + 1 < argc) {
             warmupBytes = _wcstoui64(argv[++i], nullptr, 10);
+        } else if (wcscmp(argv[i], L"--len") == 0 && i + 1 < argc) {
+            pinLength = _wcstoui64(argv[++i], nullptr, 10);
+        } else if (wcscmp(argv[i], L"--hold") == 0) {
+            doHold = TRUE;
         }
     }
     if (pid == 0) {
         wprintf(
             L"usage: container --pid <pid> [--va <hex-va>] [--write] "
-            L"[--bench N] [--warmup bytes]\n");
+            L"[--bench N] [--len bytes] [--warmup bytes] [--hold]\n");
         return 2;
     }
-    return AttachAndRun(pid, va, warmupBytes, doWrite, bench) ? 0 : 1;
+    return AttachAndRun(pid, va, pinLength, warmupBytes, doWrite, bench, doHold)
+               ? 0
+               : 1;
 }

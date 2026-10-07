@@ -37,6 +37,12 @@
 #define SM_FLAG_DRY_RUN 0x00000001u        // plan only, no page-table writes
 #define SM_FLAG_WRITE_ENABLED 0x00000002u  // container PML4 entries rewritten
 
+// Upper bound for the mirrored-range pin: reads through the mirror beyond
+// the pinned range can fault fatally in the VAD-less container (finding
+// 5e), so the protocol carries an explicit length instead of assuming a
+// single page.
+#define SM_MAX_PIN_LENGTH 0x100000u  // 1 MiB
+
 #pragma pack(push, 8)
 
 typedef struct _SM_WINDOW_MAPPING {
@@ -47,7 +53,12 @@ typedef struct _SM_WINDOW_MAPPING {
 typedef struct _SM_ATTACH_IN {
     uint32_t TargetPid;
     uint32_t Reserved;
+    // A target VA whose window gets mirrored for real in the write build
     uint64_t TargetVa;
+    // Bytes to pin at TargetVa (driver clamps to [1, SM_MAX_PIN_LENGTH];
+    // 0 => one page).
+    uint32_t TargetLength;
+    uint32_t Reserved2;
 } SM_ATTACH_IN;
 
 typedef struct _SM_ATTACH_OUT {
@@ -76,7 +87,7 @@ typedef struct _SM_INFO_OUT {
 #pragma pack(pop)
 
 SM_STATIC_ASSERT(offsetof(SM_ATTACH_OUT, Windows) == 24, "wire layout pin");
-SM_STATIC_ASSERT(sizeof(SM_ATTACH_IN) == 16, "wire layout pin");
+SM_STATIC_ASSERT(sizeof(SM_ATTACH_IN) == 24, "wire layout pin");
 SM_STATIC_ASSERT(sizeof(SM_INFO_OUT) == 32, "wire layout pin");
 
 #endif  // DRIVER_PROTOCOL_H_

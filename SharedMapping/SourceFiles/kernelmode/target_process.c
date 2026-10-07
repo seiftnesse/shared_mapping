@@ -28,9 +28,6 @@ VOID SmWriteUserDtb(PEPROCESS Process, const SM_KERNEL_OFFSETS* Offsets,
     *field = Value;
 }
 
-#define SM_DTB_KERNEL_SHADOW (1ull << 1)
-#define SM_DTB_USER_SHADOW (1ull << 0)
-
 static volatile UINT8* AddressPolicyOf(PEPROCESS Process,
                                        const SM_KERNEL_OFFSETS* Offsets) {
     return (volatile UINT8*)((UINT8*)Process + Offsets->AddressPolicyOffset);

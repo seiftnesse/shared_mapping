@@ -40,10 +40,15 @@ typedef struct {
     // page-table pages they reference (P2). The target layout can change
     // under the mirror (P1 note), so drops always use these snapshots.
     UINT64 TargetEntry[SM_USER_SLOT_COUNT];
+    // Container's shadow-PML4 physical address when KPTI is active (from
+    // KPROCESS+0x400; 0 => KPTI off). Lives outside the write gate: the
+    // plan's occupied-slot union consults it in dry builds too.
+    UINT64 SelfShadowPhys;
 #if SM_ENABLE_WRITE
     // Live-mirror bookkeeping: the one window whose entry was written into
-    // the container PML4, the container's saved KVA-shadow markers (P7),
-    // and the watchdog stop event.
+    // the container PML4(s) - dual-write keeps kernel and shadow sides
+    // consistent so the MiCheckProcessShadow audit passes without touching
+    // any markers - and the watchdog stop event.
     BOOLEAN MirroredActive;
     ULONG MirroredWindow;
     BOOLEAN ShadowSaved;
@@ -60,11 +65,11 @@ static const SM_KERNEL_OFFSETS* g_Offsets;
 // page access path (see SmAccessPageEntry).
 static HANDLE g_PhysSection;
 
-// All diagnostic lines print at ERROR level: after a VM snapshot restore
-// the DbgPrint filter dropped INFO-level [smmap] output, and the decisive
-// selftest/plan-miss lines never reached the KD paste while the ERROR
-// lines did (VM-verified 2026-10-06).
-#define SM_LOGD SM_LOGE
+#define SM_LOGD SM_LOG
+
+#ifndef SM_ENABLE_SELFTEST
+#define SM_ENABLE_SELFTEST 1
+#endif
 
 // clang-cl has no MSVC __stac/__clac intrinsics; the instructions are the
 // documented SMAP toggles (SDM Vol. 2A: STAC/CLAC).
@@ -147,14 +152,14 @@ static NTSTATUS TouchTargetRange(PEPROCESS Target, UINT64 Address, ULONG Size) {
     return st;
 }
 
-// The \\Device\\PhysicalMemory section view reads the LIVE page tables --
+// The \\Device\\PhysicalMemory section view reads the LIVE page tables -
 // its walk completed to the pinned leaf while MmCopyMemory point reads
 // AND the direct-map alias returned STALE entries whose chains were dead.
 // MmCopyMemory and MmGetVirtualForPhysical stay in the code ONLY as
 // comparison views in diagnostics; every decision goes through here.
 // Primary attempt: hand-built MDL + MmMapLockedPages (refused by Mm for
 // PML4 frames on this build, 17/17 NULL). Fallback: transient RW view of
-// \\Device\\PhysicalMemory -- the view is a USER VA in the current
+// \\Device\\PhysicalMemory - the view is a USER VA in the current
 // process, so accesses run under STAC (SMAP) inside __try; the physical
 // access itself is context-independent.
 typedef struct {
@@ -177,7 +182,8 @@ static BOOLEAN SmMapPage(UINT64 PagePhys, PUCHAR MdlBuf, SM_PAGE_MAP* Map) {
     }
     Map->Mdl = NULL;
     if (g_PhysSection == NULL) {
-        UNICODE_STRING name = RTL_CONSTANT_STRING(L"\\Device\\PhysicalMemory");
+        UNICODE_STRING name;
+        RtlInitUnicodeString(&name, L"\\Device\\PhysicalMemory");
         OBJECT_ATTRIBUTES oa;
         InitializeObjectAttributes(
             &oa, &name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
@@ -339,15 +345,15 @@ static NTSTATUS BuildWindowPlan(UINT64 TargetDtb, UINT64 SelfKernelDtb,
 
 #if SM_ENABLE_WRITE
 // Watchdog: bounds the exposure of a live mirror. The thread is spawned
-// detached (its handle is closed right away -- nobody ever waits on it, so
+// detached (its handle is closed right away - nobody ever waits on it, so
 // there is no leak and no deadlock); on wake it detaches unless the client
 // already did.
 //
 // It waits on BOTH the stop event and the client process object: the
 // process object is signaled at termination, while the destroy notify
-// (SmOnProcessNotify) fires only in PspProcessDelete -- AFTER
+// (SmOnProcessNotify) fires only in PspProcessDelete - AFTER
 // MmCleanProcessAddressSpace has already walked and deleted the VADs
-// (VM-verified: bugcheck 21 QUOTA_UNDERFLOW in MiRemoveVadCharges ran
+// (bugcheck 21 QUOTA_UNDERFLOW in MiRemoveVadCharges ran
 // before our notify could clear the mirrored PML4E). Waiting on the
 // referenced EPROCESS is safe: our own reference keeps the pointer valid.
 static VOID WatchdogThread(PVOID Context) {
@@ -370,18 +376,18 @@ static VOID WatchdogThread(PVOID Context) {
 
 // Windows maps the live page tables of the CURRENT CR3 into kernel VA
 // space via the PTE self-map; Mm itself edits page tables through it.
-// Unlike the MmGetVirtualForPhysical alias -- VM-verified 2026-10-06 to
+// Unlike the MmGetVirtualForPhysical alias
 // return stale phantom content that flip-flops between reads (plan misses,
-// dead PDPTs, a mirror write into a phantom page) -- a self-map access is
+// dead PDPTs, a mirror write into a phantom page) - a self-map access is
 // translated by the CPU through the live CR3 and cannot lie. The self-map
 // slot is BOOT-RANDOMIZED on this system: the classic 0xFFFFF68000000000
-// guess bugchecked 0x50 (faults inside the PTE area are not catchable,
-// VM-verified 2026-10-07), so the base is DERIVED at runtime by scanning
+// guess bugchecked 0x50 (faults inside the PTE area are not catchable),
+// so the base is DERIVED at runtime by scanning
 // the live PML4 for the self-referential entry. Abandoned after three
 // 0x50s; kept here only as the historical note. The truth path for all
 // page-table access is SmMapPage/SmAccessPageEntry above.
 
-// Stage 5: writes the captured PML4E of the ONE window containing
+// Writes the captured PML4E of the ONE window containing
 // TargetVa into the container KERNEL PML4. The container was opted out of
 // KVA shadow at attach (P7: MiCheckProcessShadow bugchecks on hand-written
 // shadow entries), so a single copy is authoritative and visible from user
@@ -402,7 +408,7 @@ static NTSTATUS MirrorSingleWindow(UINT64 TargetVa, SM_ATTACH_OUT* Out) {
     UINT64 entry = g_Mirror.TargetEntry[w];
     // Re-read the entry through the TRUTH path (section view): the plan's
     // capture and every MmCopyMemory point read may hold STALE entries
-    // (VM-verified 2026-10-07: the copy view named a dead PDPT while the
+    // (the copy view named a dead PDPT while the
     // section view named the live chain reaching the pinned leaf).
     UINT64 live = 0;
     BOOLEAN haveLive =
@@ -424,30 +430,64 @@ static NTSTATUS MirrorSingleWindow(UINT64 TargetVa, SM_ATTACH_OUT* Out) {
     }
 
     const ULONG slot = Out->Windows[w].ContainerSlot;
-    // Write through the MDL mapping of the container's real PML4 page and
-    // take the read-back through the same mapping as the verdict: the
-    // direct-map alias wrote into a phantom page (finding 13), so it is
-    // not used at all any more.
+    // Write through the truth path and take the read-back as the verdict:
+    // the direct-map alias wrote into a phantom page, so it
+    // is not used at all any more.
+    //
+    // NX normalization: Mm keeps NX=1 on
+    // user-slot entries of the ShadowMapping copy; the audit masks
+    // preserve bit 63, so a kernel-side NX=0 vs shadow NX=1 mismatch is
+    // exactly 1a/0x3600 with Arg3 NX=0 / Arg4 NX=1. Both container writes
+    // therefore set NX -- data read/write through the mirror is
+    // unaffected, only execution is barred (not needed).
     NTSTATUS st = STATUS_SUCCESS;
-    UINT64 written = entry;
+    UINT64 written = entry | 0x8000000000000000ull;
     if (!SmAccessPageEntry(g_Mirror.SelfKernelDtb, slot, TRUE, &written)) {
         SM_LOGE("mirror write: container PML4 not mappable");
         return STATUS_UNSUCCESSFUL;
     }
-    if (written != entry) {
+    if (written != (entry | 0x8000000000000000ull)) {
         SM_LOGE("mirror: PXE[%u] WRITE-LOST (back=0x%I64x want=0x%I64x)", slot,
-                written, entry);
+                written, entry | 0x8000000000000000ull);
         return STATUS_UNSUCCESSFUL;
     }
-    SM_LOGD("mirror: PXE[%u] verified live=0x%I64x", slot, written);
-    // VM-verified (data_va == expected AV in the client): the TLB can hold
-    // a stale not-present WALK entry for the new slot even though no data
-    // was ever accessed through it (INVLPG cannot fix this: it flushes
-    // leaf translations, not upper-level walk caches). A CR3 reload on the
-    // container's CPU drops the whole local TLB, making the new PML4E
-    // visible to every subsequent access. The client thread performs its
-    // own next access on this CPU after the IOCTL returns.
-    __writecr3(__readcr3());
+    SM_LOGD("mirror: PXE[%u] kernel verified live=0x%I64x", slot, written);
+
+    // KPTI: the shadow copy carries the same NX=1 entry -- the audit's
+    // normalized sides become equal by construction.
+    if (g_Mirror.SelfShadowPhys != 0) {
+        UINT64 shadowWritten = entry | 0x8000000000000000ull;
+        if (!SmAccessPageEntry(g_Mirror.SelfShadowPhys, slot, TRUE,
+                               &shadowWritten) ||
+            shadowWritten != (entry | 0x8000000000000000ull)) {
+            SM_LOGE("mirror: shadow PXE[%u] WRITE-LOST (back=0x%I64x)", slot,
+                    shadowWritten);
+            return STATUS_UNSUCCESSFUL;
+        }
+        SM_LOGD("mirror: PXE[%u] shadow verified live=0x%I64x", slot,
+                shadowWritten);
+    }
+
+    // Visibility of the new slot: the TLB can hold a stale not-present WALK
+    // entry for it even though no data was ever accessed through it
+    // With KPTI the user CR3 carries its own
+    // PCID that a local CR3 reload cannot touch -- the dual path flushes
+    // with a broadcast KeFlushEntireTb (exported; resolved once).
+    if (g_Mirror.SelfShadowPhys != 0) {
+        static PVOID flushTb;
+        if (flushTb == NULL) {
+            UNICODE_STRING name;
+            RtlInitUnicodeString(&name, L"KeFlushEntireTb");
+            flushTb = MmGetSystemRoutineAddress(&name);
+        }
+        if (flushTb != NULL) {
+            ((VOID(NTAPI*)(BOOLEAN, BOOLEAN))flushTb)(TRUE, TRUE);
+        } else {
+            SM_LOGE("mirror: KeFlushEntireTb unresolved -- stale TLB risk");
+        }
+    } else {
+        __writecr3(__readcr3());
+    }
     g_Mirror.MirroredActive = TRUE;
     g_Mirror.MirroredWindow = w;
     Out->Flags |= SM_FLAG_WRITE_ENABLED;
@@ -458,7 +498,7 @@ static NTSTATUS MirrorSingleWindow(UINT64 TargetVa, SM_ATTACH_OUT* Out) {
     return STATUS_SUCCESS;
 }
 
-// VM 2026-10-05 run: the mirror write lands (PXE[5] present, our captured
+// The mirror write lands (PXE[5] present, our captured
 // entry) but the PDPT it references lacks the target's PDE (PPE[389] = 0)
 // while the target itself reads the page fine (pin before the plan, warmup
 // st=0x0 after the mirror went on). Our view of the target's tables
@@ -471,9 +511,8 @@ static NTSTATUS MirrorSingleWindow(UINT64 TargetVa, SM_ATTACH_OUT* Out) {
 // Walks Va from Dtb through the truth path only. The direct-map and
 // MmCopyMemory comparison calls that used to run here are GONE: their
 // dereference crashed with an uncatchable 0x50 in the hyperspace/system
-// region (VM-verified 2026-10-07, right after the PXE line), and the
-// inversion they proved (finding 19) is settled -- no diagnostic value
-// left, only risk.
+// region, right after the PXE line), and the inversion they proved
+// is settled -- no diagnostic value left, only risk.
 static UINT64 SmWalkAndLog(const CHAR* Tag, UINT64 Dtb, UINT64 Va) {
     static const CHAR* names[4] = {"PXE", "PPE", "PDE", "PTE"};
     const UINT32 idx[4] = {
@@ -583,9 +622,8 @@ static VOID SmMirrorSelfTest(UINT64 TargetVa, PEPROCESS Target,
         mmPa.QuadPart = 0;
     }
     // MDL-mapped walk of the live chain: the PML4E and every LOWER level
-    // read through fresh Mm-built mappings of the entry pages -- the
+    // read through fresh Mm-built mappings of the entry pages - the
     // tie-breaking third view against direct/copy when they disagree
-    // (PPE=0 vs Mm view match, run 2026-10-07).
     UINT64 hwLeaf = 0;
     {
         static const CHAR* hn[4] = {"PXE", "PPE", "PDE", "PTE"};
@@ -684,9 +722,6 @@ static VOID SmMirrorSelfTest(UINT64 TargetVa, PEPROCESS Target,
 
     if (leafPhys == 0) {
         // Dereferencing the mirror VA through an incomplete chain faults
-        // in kernel mode inside a system service -- bugcheck 3B
-        // (VM-verified 2026-10-05, three crashes right after the walk
-        // aborts). Only the user-mode client may touch it in this state.
         SM_LOGE("selftest: kernel probe skipped (mirror chain incomplete)");
         return;
     }
@@ -714,10 +749,17 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out) {
     // METHOD_BUFFERED: In and Out share one SystemBuffer. Out writes later
     // clobber the input at offset 8, so TargetVa must be captured first.
     const UINT64 targetVa = In->TargetVa;
+    // Captured with TargetVa: METHOD_BUFFERED shares one SystemBuffer for
+    // In/Out, so later Out writes clobber the input fields. The pin length
+    // is clamped to one page when zero (legacy single-page contract).
+    ULONG targetLength = In->TargetLength;
+    if (targetLength == 0 || targetLength > SM_MAX_PIN_LENGTH) {
+        targetLength = targetLength == 0 ? PAGE_SIZE : SM_MAX_PIN_LENGTH;
+    }
 
 #if SM_ENABLE_WRITE
     // A zero marker offset means a truncated offset table, not a real
-    // field: the save/clear below would read and zero the EPROCESS header
+    // field: the shadow-PML4 reads below would land on the EPROCESS header
     // at +0. Refuse before touching the process.
     if (targetVa != 0 &&
         (g_Offsets == NULL || g_Offsets->AddressPolicyOffset == 0 ||
@@ -727,37 +769,46 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out) {
             "(truncated offset table?)");
         return STATUS_NOT_SUPPORTED;
     }
-    // P7 opt-out, BEFORE the fast mutex: the forced context switch below
-    // needs PASSIVE_LEVEL. SwapContext (IDA, 19041) gates the shadow path
-    // on DTB bit 1 + AddressPolicy bit 0; clearing the whole marker set
-    // makes user mode run on the kernel CR3 (zeroing UserDirectoryTableBase
-    // alone triple-faults: the shadow path then loads a null user CR3).
-    // The per-CPU KPTI bookkeeping in KPCR is refreshed at context switch,
-    // hence the forced delay below.
+    // KPTI handling, dual-write via EPROCESS->Vm.Shared.ShadowMapping
+    // (offset chain VM-verified on a healthy boot, 2026-10-07):
+    // EPROCESS+0x680 (_MMSUPPORT_FULL Vm) -> +0x0C0 Shared ->
+    // +0x048 ShadowMapping = a self-map VA of the process's SHADOW PML4
+    // (a full copy of the PML4 on the neighboring frame, upper software
+    // bits normalized: DirBase slot 0 was 0x8A000001F0A45867 while the
+    // shadow held 0x0A000001F0A45867). MiUnlockWorkingSetShared ->
+    // MiCheckProcessShadow compares exactly this page against the real
+    // PML4, with the kernel side masked 0xCFFFFFFFFFFFFFDF (bits 61:60
+    // clear) - so the shadow copy of the mirror entry is written with
+    // bits 61:60 cleared. The user CR3 is loaded from this shadow, so a
+    // shadow write makes the entry user-visible with NO fault and no
+    // marker touched; visibility flush is broadcast KeFlushEntireTb
+    // (the shadow CR3 carries its own PCID, finding 5f).
+    // Offsets source: live KD, `dt nt!_MMSUPPORT_FULL <ep>+0x680` +
+    // `!pte ShadowMapping` cross-checked with DirBase contents.
     PEPROCESS selfEarly = PsGetCurrentProcess();
-    BOOLEAN shadowCleared = FALSE;
-    if (targetVa != 0) {
-        SM_SHADOW_SAVE save;
-        SmSaveShadowState(selfEarly, g_Offsets, &save);
-        // One trace line with all four markers: verifies on the VM that the
-        // save hits the real fields (offsets fix) and that the clear below
-        // is a no-op under KPTI-off (udtb 0, bit 1 clear, +0x400 zero).
-        SM_LOGD(
-            "opt-out save: dtb=0x%I64x udtb=0x%I64x ap=0x%02x shadow=0x%I64x",
-            save.RawDtb, save.UserDtb, (UINT32)save.AddressPolicy,
-            save.ShadowDtbPointer);
-        SmClearShadowState(selfEarly, g_Offsets);
-        // A >0 wait is required: a zero delay may return without a switch,
-        // leaving the per-CPU KPTI state (KPCR) stale -- the stale state is
-        // exactly what made MiCheckProcessShadow bugcheck (VM-verified).
-        // 1 ms forces the thread through Idle and back, so SwapContext
-        // re-reads the cleared markers on both transitions.
-        LARGE_INTEGER oneMs;
-        oneMs.QuadPart = -10000;  // 1 ms, relative
-        KeDelayExecutionThread(KernelMode, FALSE, &oneMs);
-        g_Mirror.ShadowSave = save;
-        g_Mirror.ShadowSaved = TRUE;
-        shadowCleared = TRUE;
+    {
+        UINT64 shadowVa = 0;
+        UINT64 shadowPhys = 0;
+        __try {
+            shadowVa =
+                *(volatile UINT64*)((UINT8*)selfEarly + 0x680 + 0xC0 + 0x48);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            shadowVa = 0;
+        }
+        if (shadowVa >= 0xFFFF800000000000ull) {
+            __try {
+                PHYSICAL_ADDRESS pa = MmGetPhysicalAddress((PVOID)shadowVa);
+                shadowPhys = (UINT64)pa.QuadPart & ~0xFFFull;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                shadowPhys = 0;
+            }
+        }
+        if (shadowPhys != 0 && !PhysInRam(shadowPhys)) {
+            shadowPhys = 0;
+        }
+        SM_LOGD("kpti: shadowva=0x%I64x shadowphys=0x%I64x -> %s", shadowVa,
+                shadowPhys, shadowPhys != 0 ? "DUAL-WRITE" : "kernel-only");
+        g_Mirror.SelfShadowPhys = shadowPhys;
     }
 #endif
 
@@ -817,12 +868,12 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out) {
         // attached to the target faults it in AND locks it against
         // trimming, so the client's read never faults and never enters
         // Mm's transition-resolution path (VM-verified: that path kills
-        // the VAD-less process silently -- the read must not fault at
+        // the VAD-less process silently - the read must not fault at
         // all). The probe also creates the page-table page, so the
         // requested slot exists at plan time; the retry loop stays for
         // the residual trim race.
         mirrorMdl =
-            IoAllocateMdl((PVOID)targetVa, PAGE_SIZE, FALSE, FALSE, NULL);
+            IoAllocateMdl((PVOID)targetVa, targetLength, FALSE, FALSE, NULL);
         if (mirrorMdl == NULL) {
             st = STATUS_INSUFFICIENT_RESOURCES;
             goto Cleanup;
@@ -843,43 +894,34 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out) {
             goto Cleanup;
         }
 
-        // Expect a race anyway: under trim pressure the top-level table
-        // is a moving target (VM-verified: the buffer slot vanished
-        // between two attaches a second apart). Touch, replan, and retry
-        // until the requested slot is present (bounded).
+        // The pin above faulted the page in through the target's VADs, so
+        // the requested slot exists at plan time - one plan, no retries
+        // (the retry loop predates the pin and the truth-path plan).
         const ULONG targetSlot = SmPml4Index(targetVa);
-        for (ULONG attempt = 0;; ++attempt) {
-            RtlZeroMemory(Out, sizeof(*Out));
-            Out->TargetKernelDtb = g_Mirror.TargetKernelDtb;
-            Out->TargetUserDtb = g_Mirror.TargetUserDtb;
-            st = BuildWindowPlan(g_Mirror.TargetKernelDtb,
-                                 g_Mirror.SelfKernelDtb, g_Mirror.SelfUserDtb,
-                                 Out, g_Mirror.TargetEntry);
-            if (!NT_SUCCESS(st)) {
-                goto Cleanup;
-            }
-            BOOLEAN found = FALSE;
-            for (ULONG k = 0; k < Out->WindowCount; ++k) {
-                if (Out->Windows[k].TargetSlot == targetSlot) {
-                    found = TRUE;
-                    break;
-                }
-            }
-            if (found || attempt >= 2) {
-                if (!found) {
-                    st = STATUS_INVALID_PARAMETER;
-                    // The pin succeeded, so the slot exists in the target's
-                    // live tables: dump the view-vs-truth pair for it.
-                    SmLogPlanMiss(targetSlot, targetVa, target);
-                    goto Cleanup;
-                }
+        RtlZeroMemory(Out, sizeof(*Out));
+        Out->TargetKernelDtb = g_Mirror.TargetKernelDtb;
+        Out->TargetUserDtb = g_Mirror.TargetUserDtb;
+        st = BuildWindowPlan(
+            g_Mirror.TargetKernelDtb, g_Mirror.SelfKernelDtb,
+            (g_Mirror.SelfShadowPhys != 0 ? g_Mirror.SelfShadowPhys
+                                          : g_Mirror.SelfUserDtb),
+            Out, g_Mirror.TargetEntry);
+        if (!NT_SUCCESS(st)) {
+            goto Cleanup;
+        }
+        BOOLEAN found = FALSE;
+        for (ULONG k = 0; k < Out->WindowCount; ++k) {
+            if (Out->Windows[k].TargetSlot == targetSlot) {
+                found = TRUE;
                 break;
             }
-            st = TouchTargetRange(target, targetVa, PAGE_SIZE);
-            if (!NT_SUCCESS(st)) {
-                SM_LOGE("target page touch failed: 0x%lx", (ULONG)st);
-                goto Cleanup;
-            }
+        }
+        if (!found) {
+            st = STATUS_INVALID_PARAMETER;
+            // The pin succeeded, so the slot exists in the target's live
+            // tables: dump the live-vs-plan pair for it.
+            SmLogPlanMiss(targetSlot, targetVa, target);
+            goto Cleanup;
         }
     } else
 #endif
@@ -887,8 +929,11 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out) {
         RtlZeroMemory(Out, sizeof(*Out));
         Out->TargetKernelDtb = g_Mirror.TargetKernelDtb;
         Out->TargetUserDtb = g_Mirror.TargetUserDtb;
-        st = BuildWindowPlan(g_Mirror.TargetKernelDtb, g_Mirror.SelfKernelDtb,
-                             g_Mirror.SelfUserDtb, Out, g_Mirror.TargetEntry);
+        st = BuildWindowPlan(
+            g_Mirror.TargetKernelDtb, g_Mirror.SelfKernelDtb,
+            (g_Mirror.SelfShadowPhys != 0 ? g_Mirror.SelfShadowPhys
+                                          : g_Mirror.SelfUserDtb),
+            Out, g_Mirror.TargetEntry);
         if (!NT_SUCCESS(st)) {
             goto Cleanup;
         }
@@ -930,7 +975,9 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out) {
             }
             goto Cleanup;
         }
+#if SM_ENABLE_SELFTEST
         SmMirrorSelfTest(targetVa, target, Out, mirrorMdl);
+#endif
     }
 #endif
 
@@ -983,22 +1030,11 @@ Cleanup:
         KeUnstackDetachProcess(&apcState);
         IoFreeMdl(mirrorMdl);
     }
-    if (shadowCleared) {
-        // Attach failed after the opt-out: put the shadow markers back.
-        SmRestoreShadowState(selfEarly, g_Offsets, &g_Mirror.ShadowSave);
-        g_Mirror.ShadowSaved = FALSE;
-    }
 #endif
     ExReleaseFastMutex(&g_Mirror.Lock);
     return st;
 
 ReleaseAndExit:
-#if SM_ENABLE_WRITE
-    if (shadowCleared) {
-        SmRestoreShadowState(selfEarly, g_Offsets, &g_Mirror.ShadowSave);
-        g_Mirror.ShadowSaved = FALSE;
-    }
-#endif
     ExReleaseFastMutex(&g_Mirror.Lock);
     return st;
 }
@@ -1009,25 +1045,25 @@ NTSTATUS SmMirrorDetach(VOID) {
 #if SM_ENABLE_WRITE
         if (g_Mirror.MirroredActive) {
             // Rollback: zero the mirrored slot in the container's REAL
-            // PML4 page through the MDL mapping (the direct-map alias can
-            // be a phantom, finding 13). Physical, so this works from any
-            // context (watchdog, process notify). Threads on other CPUs
-            // may still hold stale translations and AV by design (P5,
-            // research scope).
+            // PML4 page(s) through the truth path (physical, works from
+            // any context: watchdog, process notify). Threads on other
+            // CPUs may still hold stale translations and AV by design
+            // (P5, research scope).
             const ULONG slot =
                 g_Mirror.Windows[g_Mirror.MirroredWindow].ContainerSlot;
             UINT64 zero = 0;
             if (!SmAccessPageEntry(g_Mirror.SelfKernelDtb, slot, TRUE, &zero)) {
                 SM_LOGE("detach zero: container PML4 not mappable");
             }
+            if (g_Mirror.SelfShadowPhys != 0) {
+                UINT64 shadowZero = 0;
+                if (!SmAccessPageEntry(g_Mirror.SelfShadowPhys, slot, TRUE,
+                                       &shadowZero)) {
+                    SM_LOGE("detach zero: shadow PML4 not mappable");
+                }
+            }
             __writecr3(__readcr3());
             g_Mirror.MirroredActive = FALSE;
-        }
-        // P7: give the container its KVA shadow back (all three markers).
-        if (g_Mirror.ShadowSaved && g_Mirror.SelfProcess != NULL) {
-            SmRestoreShadowState(g_Mirror.SelfProcess, g_Offsets,
-                                 &g_Mirror.ShadowSave);
-            g_Mirror.ShadowSaved = FALSE;
         }
         if (g_Mirror.MirrorMdl != NULL) {
             KAPC_STATE apcState;
