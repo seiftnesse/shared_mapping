@@ -47,6 +47,7 @@ typedef struct _SM_WINDOW_MAPPING {
 typedef struct _SM_ATTACH_IN {
     uint32_t TargetPid;
     uint32_t Reserved;
+    uint64_t TargetVa;
 } SM_ATTACH_IN;
 
 typedef struct _SM_ATTACH_OUT {
@@ -67,7 +68,7 @@ typedef struct _SM_INFO_OUT {
     uint32_t Attached;
     uint32_t TargetPid;
     uint32_t WindowCount;
-    uint32_t Reserved;
+    int32_t PfnBalance;  // bumped minus dropped share counts
     uint64_t TargetKernelDtb;
     uint64_t TargetUserDtb;
 } SM_INFO_OUT;
@@ -75,5 +76,7 @@ typedef struct _SM_INFO_OUT {
 #pragma pack(pop)
 
 SM_STATIC_ASSERT(offsetof(SM_ATTACH_OUT, Windows) == 24, "wire layout pin");
+SM_STATIC_ASSERT(sizeof(SM_ATTACH_IN) == 16, "wire layout pin");
+SM_STATIC_ASSERT(sizeof(SM_INFO_OUT) == 32, "wire layout pin");
 
 #endif  // DRIVER_PROTOCOL_H_

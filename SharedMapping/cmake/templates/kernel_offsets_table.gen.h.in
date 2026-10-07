@@ -1,5 +1,8 @@
 // GENERATED from SourceFiles/common/kernel_offsets.csv by the
 // generate_kernel_offsets build task -- do not edit; edit the CSV instead.
+// Rows are POSITIONAL initializers: the CSV column order after nt_version
+// MUST stay identical to the SM_KERNEL_OFFSETS field order (the generator
+// skips nt_version). The unit test pins every value of every row.
 
 #ifndef KERNEL_OFFSETS_TABLE_GEN_H_
 #define KERNEL_OFFSETS_TABLE_GEN_H_

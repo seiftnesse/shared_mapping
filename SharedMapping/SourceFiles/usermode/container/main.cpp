@@ -6,6 +6,51 @@
 #include "common/driver_protocol.h"
 #include "common/pml4.h"
 
+static volatile const void* SmExpectedVa;
+
+static LONG WINAPI SmVectoredLogger(struct _EXCEPTION_POINTERS* Info) {
+    const ULONG_PTR* info = Info->ExceptionRecord->ExceptionInformation;
+    fprintf(stderr,
+            "exc: code=0x%08lX at=%p access=%s data_va=0x%p (expected %p)\n",
+            (unsigned long)Info->ExceptionRecord->ExceptionCode,
+            Info->ExceptionRecord->ExceptionAddress,
+            info[0] == 0 ? "READ" : (info[0] == 1 ? "WRITE" : "OTHER"),
+            (const void*)info[1], SmExpectedVa);
+    fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static BOOL SafeRead(const void* Address, void* Buffer, size_t Size) {
+    __try {
+        memcpy(Buffer, Address, Size);
+        return TRUE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return FALSE;
+    }
+}
+
+static BOOL SafeWrite(void* Address, const void* Buffer, size_t Size) {
+    __try {
+        memcpy(Address, Buffer, Size);
+        return TRUE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return FALSE;
+    }
+}
+
+static unsigned long long BenchRead(const volatile unsigned long long* Address,
+                                    unsigned long long Iterations) {
+    unsigned long long sum = 0;
+    __try {
+        for (unsigned long long i = 0; i < Iterations; ++i) {
+            sum += Address[i & 0xF];  // stay within a couple of pages
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return ~0ull;
+    }
+    return sum;
+}
+
 static BOOL Warmup(HANDLE device, unsigned long long va,
                    unsigned long long bytes) {
     SM_WARMUP_IN in;
@@ -18,13 +63,78 @@ static BOOL Warmup(HANDLE device, unsigned long long va,
         wprintf(L"warmup 0x%llx+%llu failed: %lu\n", va, bytes, GetLastError());
         return FALSE;
     }
-    wprintf(L"warmup 0x%llx+%llu: OK (pages faulted in via the target VAD)\n",
-            va, bytes);
+    wprintf(L"warmup 0x%llx+%llu: OK\n", va, bytes);
     return TRUE;
 }
 
-static BOOL AttachAndPrint(ULONG pid, unsigned long long warmupVa,
-                           unsigned long long warmupBytes) {
+static void PrintBalance(HANDLE device) {
+    SM_INFO_OUT info;
+    DWORD returned = 0;
+    memset(&info, 0, sizeof(info));
+    if (DeviceIoControl(device, IOCTL_SM_GETINFO, nullptr, 0, &info,
+                        sizeof(info), &returned, 0)) {
+        wprintf(L"pfn balance after detach: %d (expected 0)\n",
+                info.PfnBalance);
+    }
+}
+
+static BOOL RunMirror(HANDLE device, SM_ATTACH_OUT* out, unsigned long long va,
+                      BOOL doWrite, unsigned long long bench) {
+    // Find the window containing va and translate it (P1 shift formula).
+    unsigned long long translated = 0;
+    for (unsigned i = 0; i < out->WindowCount && i < SM_USER_SLOT_COUNT; ++i) {
+        if (out->Windows[i].TargetSlot == SmPml4Index(va)) {
+            translated = SmSlotBase(out->Windows[i].ContainerSlot) |
+                         (va & (SM_SLOT_SIZE - 1));
+            break;
+        }
+    }
+    if (translated == 0) {
+        wprintf(L"translate: no window for slot %u\n", SmPml4Index(va));
+        return FALSE;
+    }
+    wprintf(L"mirror: target va 0x%llx -> container va 0x%llx\n", va,
+            translated);
+    SmExpectedVa = (const void*)translated;
+
+    char buf[65];
+    memset(buf, 0, sizeof(buf));
+    if (SafeRead((const void*)translated, buf, 64)) {
+        wprintf(L"read : \"%hs\"\n", buf);
+    } else {
+        wprintf(L"read : ACCESS VIOLATION (page not resident? try --warmup)\n");
+    }
+
+    if (doWrite) {
+        static const char marker[] = "SM-WRITE-FROM-CONTAINER";
+        if (SafeWrite((void*)translated, marker, sizeof(marker))) {
+            wprintf(L"write: OK (check the target with [p])\n");
+        } else {
+            wprintf(L"write: ACCESS VIOLATION (read-only page?)\n");
+        }
+    }
+
+    if (bench > 0) {
+        LARGE_INTEGER freq, t0, t1;
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&t0);
+        const unsigned long long sum =
+            BenchRead((const volatile unsigned long long*)translated, bench);
+        QueryPerformanceCounter(&t1);
+        if (sum == ~0ull) {
+            wprintf(L"bench: AV during reads\n");
+        } else {
+            wprintf(L"bench: %llu reads, %.2f ns/read\n", bench,
+                    (double)(t1.QuadPart - t0.QuadPart) * 1e9 /
+                        (double)freq.QuadPart / (double)bench);
+        }
+    }
+    return TRUE;
+}
+
+static BOOL AttachAndRun(ULONG pid, unsigned long long va,
+                         unsigned long long warmupBytes, BOOL doWrite,
+                         unsigned long long bench) {
     SM_ATTACH_IN in;
     SM_ATTACH_OUT out;
     DWORD returned = 0;
@@ -41,6 +151,7 @@ static BOOL AttachAndPrint(ULONG pid, unsigned long long warmupVa,
     memset(&in, 0, sizeof(in));
     memset(&out, 0, sizeof(out));
     in.TargetPid = pid;
+    in.TargetVa = va;
     if (!DeviceIoControl(device, IOCTL_SM_ATTACH, &in, sizeof(in), &out,
                          sizeof(out), &returned, 0)) {
         wprintf(L"IOCTL_SM_ATTACH failed: %lu\n", GetLastError());
@@ -66,35 +177,53 @@ static BOOL AttachAndPrint(ULONG pid, unsigned long long warmupVa,
             i, out.Windows[i].TargetSlot, out.Windows[i].ContainerSlot, delta);
     }
 
-    if (warmupVa != 0 && warmupBytes != 0) {
-        Warmup(device, warmupVa, warmupBytes);
+    if (out.Flags & SM_FLAG_WRITE_ENABLED) {
+        if (va != 0) {
+            Warmup(device, va, warmupBytes);
+            RunMirror(device, &out, va, doWrite, bench);
+        } else {
+            wprintf(L"write build active but no --va given: plan only\n");
+        }
+    } else if (va != 0 && warmupBytes != 0) {
+        Warmup(device, va, warmupBytes);
     }
 
     DeviceIoControl(device, IOCTL_SM_DETACH, nullptr, 0, nullptr, 0, &returned,
                     nullptr);
+    PrintBalance(device);
     CloseHandle(device);
     return TRUE;
 }
 
 int wmain(int argc, wchar_t** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);  // survive crashes: no lost output
+    setvbuf(stderr, nullptr, _IONBF, 0);
+    AddVectoredExceptionHandler(1, SmVectoredLogger);
+    wprintf(L"client pid=%lu\n", GetCurrentProcessId());
     ULONG pid = 0;
-    unsigned long long warmupVa = 0;
-    unsigned long long warmupBytes = 0;
+    unsigned long long va = 0;
+    unsigned long long warmupBytes = 4096;
+    unsigned long long bench = 0;
+    BOOL doWrite = FALSE;
 
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"--pid") == 0 && i + 1 < argc) {
             pid = (ULONG)wcstoul(argv[++i], nullptr, 0);
+        } else if (wcscmp(argv[i], L"--va") == 0 && i + 1 < argc) {
+            va = _wcstoui64(argv[++i], nullptr, 16);
+        } else if (wcscmp(argv[i], L"--write") == 0) {
+            doWrite = TRUE;
+        } else if (wcscmp(argv[i], L"--bench") == 0 && i + 1 < argc) {
+            bench = _wcstoui64(argv[++i], nullptr, 10);
         } else if (wcscmp(argv[i], L"--warmup") == 0 && i + 1 < argc) {
-            // hex VA, decimal byte count: --warmup 0x1EAA5320000 4096
-            warmupVa = _wcstoui64(argv[++i], nullptr, 16);
-            if (i + 1 < argc) {
-                warmupBytes = _wcstoui64(argv[++i], nullptr, 10);
-            }
+            warmupBytes = _wcstoui64(argv[++i], nullptr, 10);
         }
     }
     if (pid == 0) {
-        wprintf(L"usage: container --pid <pid> [--warmup <hex-va> <bytes>]\n");
+        wprintf(
+            L"usage: container --pid <pid> [--va <hex-va>] [--write] "
+            L"[--bench N] [--warmup bytes]\n");
         return 2;
     }
-    return AttachAndPrint(pid, warmupVa, warmupBytes) ? 0 : 1;
+    return AttachAndRun(pid, va, warmupBytes, doWrite, bench) ? 0 : 1;
 }

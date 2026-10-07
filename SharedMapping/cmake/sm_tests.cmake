@@ -4,6 +4,7 @@ nice_target_sources(sm_tests ${SF}
     PRIVATE
     tests/test_pml4.cpp
     tests/test_paging_entry.cpp
+    tests/test_kernel_offsets.cpp
 )
 
 target_include_directories(sm_tests PRIVATE ${SF})

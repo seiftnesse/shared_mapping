@@ -1,6 +1,7 @@
 #include "driver.h"
 #include "common/driver_protocol.h"
 #include "mirror.h"
+#include "pfn.h"
 
 static const WCHAR SM_DEVICE_NAME[] = L"\\Device\\SharedMapping";
 static const WCHAR SM_DOS_NAME[] = L"\\DosDevices\\SharedMapping";
@@ -106,6 +107,9 @@ NTSTATUS SmIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
                 break;
             }
             st = SmMirrorAttach((SM_ATTACH_IN*)buffer, (SM_ATTACH_OUT*)buffer);
+            if (!NT_SUCCESS(st)) {
+                SM_LOGE("attach failed: 0x%lx", (ULONG)st);
+            }
             information = NT_SUCCESS(st) ? sizeof(SM_ATTACH_OUT) : 0;
             break;
 
@@ -137,6 +141,7 @@ Finish:
 VOID SmDriverUnload(PDRIVER_OBJECT DriverObject) {
     PsSetCreateProcessNotifyRoutine(SmOnProcessNotify, TRUE);
     SmMirrorShutdown();
+    SmPfnShutdown();
 
     UNICODE_STRING dosName;
     RtlInitUnicodeString(&dosName, SM_DOS_NAME);
@@ -149,9 +154,15 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject,
                      PUNICODE_STRING RegistryPath) {
     UNREFERENCED_PARAMETER(RegistryPath);
 
-    NTSTATUS st = SmMirrorInit(ResolveOffsets());
+    const SM_KERNEL_OFFSETS* offsets = ResolveOffsets();
+    NTSTATUS st = SmMirrorInit(offsets);
     if (!NT_SUCCESS(st)) {
         return st;
+    }
+    st = SmPfnInit(offsets);
+    if (!NT_SUCCESS(st)) {
+        SM_LOGE("pfn share counts unavailable: 0x%lx", (ULONG)st);
+        st = STATUS_SUCCESS;
     }
 
     UNICODE_STRING deviceName;
