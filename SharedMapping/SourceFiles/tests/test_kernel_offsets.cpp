@@ -26,29 +26,27 @@ TEST(KernelOffsets, UnknownBuildIsRejected) {
 }
 
 // Structural sanity of every row: offsets inside their structures, 8-byte
-// alignment where the hardware requires it, unique runtime keys.
+// alignment where the hardware requires it, unique runtime keys. The
+// shadow-PML4 chain (Vm -> Shared -> ShadowMapping) offsets come from the
+// PDB (llvm-pdbutil, see tools/dump-offsets.ps1) and are pinned here.
 TEST(KernelOffsets, RowsAreSane) {
     constexpr uint32_t count = std::size(SM_KernelOffsetTable);
     ASSERT_GT(count, 0u);
     for (uint32_t i = 0; i < count; ++i) {
-        const auto& [OsBuild, Ubr, DirectoryTableBaseOffset,
-                     UserDirectoryTableBaseOffset, KprocessSize,
-                     MmpfnElementSize, MmpfnShareCountOffset,
-                     MmpfnShareCountShift, MmPfnDatabasePointerRva,
-                     AddressPolicyOffset, ShadowDtbPointerOffset] =
-            SM_KernelOffsetTable[i];
-        EXPECT_LT(DirectoryTableBaseOffset, KprocessSize);
-        EXPECT_LT(UserDirectoryTableBaseOffset, KprocessSize);
-        EXPECT_EQ(DirectoryTableBaseOffset % 8u, 0u);
-        EXPECT_EQ(UserDirectoryTableBaseOffset % 8u, 0u);
-        EXPECT_LT(MmpfnShareCountOffset, MmpfnElementSize);
-        EXPECT_LT(MmpfnShareCountShift, 64u);
-        EXPECT_GT(MmPfnDatabasePointerRva, 0u);
-        EXPECT_EQ(AddressPolicyOffset, 0x390u);
-        EXPECT_EQ(ShadowDtbPointerOffset, 0x400u);
+        const SM_KERNEL_OFFSETS& row = SM_KernelOffsetTable[i];
+        EXPECT_LT(row.DirectoryTableBaseOffset, row.KprocessSize);
+        EXPECT_LT(row.UserDirectoryTableBaseOffset, row.KprocessSize);
+        EXPECT_EQ(row.DirectoryTableBaseOffset % 8u, 0u);
+        EXPECT_EQ(row.UserDirectoryTableBaseOffset % 8u, 0u);
+        EXPECT_LT(row.MmpfnShareCountOffset, row.MmpfnElementSize);
+        EXPECT_LT(row.MmpfnShareCountShift, 64u);
+        EXPECT_GT(row.MmPfnDatabasePointerRva, 0u);
+        EXPECT_EQ(row.VmOffset, 0x680u);
+        EXPECT_EQ(row.MmSupportSharedOffset, 0xc0u);
+        EXPECT_EQ(row.ShadowMappingOffset, 0x48u);
         for (uint32_t j = i + 1; j < count; ++j) {
-            EXPECT_FALSE(SM_KernelOffsetTable[j].OsBuild == OsBuild &&
-                         SM_KernelOffsetTable[j].Ubr == Ubr)
+            EXPECT_FALSE(SM_KernelOffsetTable[j].OsBuild == row.OsBuild &&
+                         SM_KernelOffsetTable[j].Ubr == row.Ubr)
                 << "duplicate runtime key at rows " << i << " and " << j;
         }
     }

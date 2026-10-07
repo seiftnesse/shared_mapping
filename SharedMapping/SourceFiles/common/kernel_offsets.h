@@ -21,13 +21,13 @@ typedef struct SM_KERNEL_OFFSETS {
     // RVA of the MmPfnDatabase pointer variable (ntoskrnl PDB publics;
     // PDB section map compresses away the zero-size Pad sections).
     uint32_t MmPfnDatabasePointerRva;
-    // KPROCESS.AddressPolicy: its bit 0 is read by SwapContext together
-    // with DTB bit 1 as the per-process KVA-shadow marker (IDA, 19041).
-    uint32_t AddressPolicyOffset;
-    // KPROCESS+0x400 (inside the PDB's "Spare2"): the real shadow-PML4
-    // pointer. MiCheckProcessShadow skips its audit when this is NULL
-    // (decompiled gate: v5 == 0), unlike the markers above.
-    uint32_t ShadowDtbPointerOffset;
+    // Shadow-PML4 chain used by the KPTI dual-write: _EPROCESS.Vm
+    // (_MMSUPPORT_FULL) -> .Shared (_MMSUPPORT_SHARED) -> .ShadowMapping
+    // (self-map VA of the process's shadow PML4; source: live KD +
+    // !pte cross-check with DirBase contents, 19041.6456).
+    uint32_t VmOffset;
+    uint32_t MmSupportSharedOffset;
+    uint32_t ShadowMappingOffset;
 } SM_KERNEL_OFFSETS;
 
 #include "kernel_offsets_table.gen.h"

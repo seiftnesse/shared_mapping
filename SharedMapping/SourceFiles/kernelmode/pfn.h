@@ -4,7 +4,6 @@
 #include "common/kernel_offsets.h"
 #include "driver.h"
 
-
 // Resolves the PFN database and validates the layout constants.
 NTSTATUS SmPfnInit(const SM_KERNEL_OFFSETS* Offsets);
 

@@ -1,7 +1,11 @@
 wdk_add_driver(shared_mapping_driver
     ${SF}/kernelmode/driver.c
+    ${SF}/kernelmode/kpti.c
     ${SF}/kernelmode/mirror.c
+    ${SF}/kernelmode/physmem.c
     ${SF}/kernelmode/pfn.c
+    ${SF}/kernelmode/plan.c
+    ${SF}/kernelmode/selftest.c
     ${SF}/kernelmode/target_process.c
     WINVER 0x0A00
 )
@@ -19,8 +23,12 @@ if(SM_ENABLE_PFN_REFCOUNT)
 endif()
 nice_target_sources(shared_mapping_driver ${SF} PRIVATE
     kernelmode/driver.c
+    kernelmode/kpti.c
     kernelmode/mirror.c
+    kernelmode/physmem.c
     kernelmode/pfn.c
+    kernelmode/plan.c
+    kernelmode/selftest.c
     kernelmode/target_process.c
 )
 

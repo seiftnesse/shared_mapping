@@ -57,7 +57,7 @@ static const SM_KERNEL_OFFSETS* ResolveOffsets(VOID) {
     const SM_KERNEL_OFFSETS* offsets =
         SmFindKernelOffsets(version.dwBuildNumber, ubr);
     if (offsets == NULL) {
-        SM_LOGE("unsupported build %u.%u -- add a kernel_offsets.csv row",
+        SM_LOGE("unsupported build %u.%u add a kernel_offsets.csv row",
                 version.dwBuildNumber, ubr);
     } else {
         SM_LOG("offsets for build %u.%u found", version.dwBuildNumber, ubr);

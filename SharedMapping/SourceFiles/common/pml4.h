@@ -1,12 +1,12 @@
 // Sources for the layout facts used here (verified against SDM revision
 // 093, document 325462-093):
-//  - Intel SDM Vol. 3A, sec. 5.5.4 "Linear-Address Translation with 4-Level
-//    Paging and 5-Level Paging"
-//    https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
-//    (https://cdrdv2.intel.com/v1/dl/getContent/671200)
-//  - Canonical addresses (user half of the VA space): SDM Vol. 1,
-//    sec. 3.3.7.1 "Canonical Addressing"; matches the Windows x64 layout
-//    (Windows Internals, 7th ed., Part 2, ch. 5).
+// - Intel SDM Vol. 3A, sec. 5.5.4 "Linear-Address Translation with 4-Level
+// Paging and 5-Level Paging"
+// https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
+// (https://cdrdv2.intel.com/v1/dl/getContent/671200)
+// - Canonical addresses (user half of the VA space): SDM Vol. 1,
+// sec. 3.3.7.1 "Canonical Addressing"; matches the Windows x64 layout
+// (Windows Internals, 7th ed., Part 2, ch. 5).
 
 #ifndef PML4_H_
 #define PML4_H_
@@ -49,6 +49,29 @@ static inline uint32_t SmPml4Index(uint64_t va) {
     return (uint32_t)(va >> SM_SLOT_SHIFT) & 0x1FFu;
 }
 
+// Lower-level slot indices (SDM Vol. 3A sec. 5.5.4, Table 5-15: PDPTE =
+// VA bits 47:30, PDE = bits 47:21, PTE = bits 47:12; 512 entries each).
+static inline uint32_t SmPdptIndex(uint64_t va) {
+    return (uint32_t)(va >> 30) & 0x1FFu;
+}
+
+static inline uint32_t SmPdIndex(uint64_t va) {
+    return (uint32_t)(va >> 21) & 0x1FFu;
+}
+
+static inline uint32_t SmPtIndex(uint64_t va) {
+    return (uint32_t)(va >> 12) & 0x1FFu;
+}
+
+// Base of the higher-canonical (kernel) half of the VA space: canonical
+// addresses with bits 63:47 set start here (SDM Vol. 3A sec. 4.1.2);
+// Windows places MmSystemRangeStart at exactly this value on x64.
+#define SM_KERNEL_VA_BASE 0xFFFF800000000000ull
+
+// EFLAGS.AC (bit 18): CR4.SMAP gates supervisor accesses of user pages on
+// this flag (SDM Vol. 3A sec. 5.6; bit position, Vol. 1 Table 3-13).
+#define SM_EFLAGS_AC (1ull << 18)
+
 // Returns the base address of the 512-GiB window `slot`.
 static inline uint64_t SmSlotBase(uint32_t slot) {
     return (uint64_t)slot << SM_SLOT_SHIFT;
@@ -56,7 +79,7 @@ static inline uint64_t SmSlotBase(uint32_t slot) {
 
 // Returns the same va expressed inside `to_slot`; 0 when va does not live
 // in `from_slot`. Note the collision: va == 0 remapped into slot 0 also
-// returns 0 -- callers always operate on non-null target addresses.
+// returns 0 callers always operate on non-null target addresses.
 static inline uint64_t SmRemapVa(uint64_t va, uint32_t from_slot,
                                  uint32_t to_slot) {
     if (SmPml4Index(va) != from_slot) {

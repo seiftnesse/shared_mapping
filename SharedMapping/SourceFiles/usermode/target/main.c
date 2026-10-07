@@ -25,7 +25,7 @@ int main(void) {
            (void*)g_buffer);
     printf("marker: %s\n", g_buffer);
     printf(
-        "commands: [p] print  [t] trim working set  [a] auto-trim 20x  "
+        "commands: [p] print [t] trim working set [a] auto-trim 20x "
         "[q] quit\n");
     fflush(stdout);
 
