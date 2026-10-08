@@ -13,8 +13,6 @@
 #define SM_LOGE(fmt, ...)                                                     \
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[smmap]! " fmt "\n", \
                __VA_ARGS__)
-// Diagnostic lines share the INFO level (an earlier ERROR-level detour was
-// a VM filter workaround, no longer needed).
 #define SM_LOGD SM_LOG
 
 // driver.c

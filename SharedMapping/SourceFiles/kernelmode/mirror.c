@@ -57,11 +57,11 @@ typedef struct {
     // consults it in dry builds too.
     UINT64 SelfShadowPhys;
 #if SM_ENABLE_WRITE
-    // Live-mirror bookkeeping: the one window whose entry was written into
-    // the container PML4s, the referenced self process (detach context),
-    // the pinned page, and the watchdog stop event.
+    // Live-mirror bookkeeping: per-window mirrored flags (every planned
+    // window is written), the referenced self process (detach context),
+    // the pinned range, and the watchdog stop event.
     BOOLEAN MirroredActive;
-    ULONG MirroredWindow;
+    BOOLEAN Mirrored[SM_USER_SLOT_COUNT];
     PEPROCESS SelfProcess;
     UINT64* PinnedPfns;
     ULONG PinnedCount;
@@ -117,80 +117,95 @@ static VOID WatchdogThread(PVOID Context) {
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
-// Writes the captured PML4E of the ONE window containing TargetVa into the
+// Zeroes the container PML4 slots of every window flagged in Mirrored[]
+// (indices [0, Count) of `Windows`) through the truth path. Pair-zeroed
+// under KPTI for the same reason the writes are paired: the audit must
+// never see one side cleared and the other still holding the foreign
+// entry. The caller flushes once after the whole batch.
+static VOID ZeroMirroredSlots(const SM_WINDOW_MAPPING* Windows, ULONG Count) {
+    for (ULONG w = 0; w < Count; ++w) {
+        if (!g_Mirror.Mirrored[w]) {
+            continue;
+        }
+        const ULONG slot = Windows[w].ContainerSlot;
+        UINT64 zero = 0;
+        UINT64 shadowZero = 0;
+        if (g_Mirror.SelfShadowPhys != 0) {
+            if (!SmPhysWritePair(g_Mirror.SelfKernelDtb, slot,
+                                 g_Mirror.SelfShadowPhys, slot, 0, 0, &zero,
+                                 &shadowZero)) {
+                SM_LOGE("mirror zero: container PML4 not mappable");
+            }
+        } else if (!SmPhysWriteEntry(g_Mirror.SelfKernelDtb, slot, 0, &zero)) {
+            SM_LOGE("mirror zero: container PML4 not mappable");
+        }
+    }
+}
+
+// Writes the captured PML4E of EVERY planned window into the
 // container kernel PML4 and (under KPTI) its ShadowMapping copy, with NX
-// set on both (see SM_MIRROR_ENTRY_NX). The entry is re-read through the
-// truth path first: Mm rewrites the target PML4E during the attach, so the
-// plan snapshot may be stale. Readbacks verify both writes.
-static NTSTATUS MirrorSingleWindow(UINT64 TargetVa, SM_ATTACH_OUT* Out) {
-    const ULONG targetSlot = SmPml4Index(TargetVa);
-    ULONG w;
-    for (w = 0; w < Out->WindowCount; ++w) {
-        if (Out->Windows[w].TargetSlot == targetSlot) {
-            break;
-        }
-    }
-    if (w >= Out->WindowCount) {
-        return STATUS_INVALID_PARAMETER;  // the VA's window is not mapped
-    }
+// set on both (see SM_MIRROR_ENTRY_NX). Readbacks verify both writes.
+// Supervisor-only windows are skipped loudly; the window containing
+// TargetVa (the pinned range the client reads) must be mirrored or the
+// attach fails. Any failure zeroes everything already written. Entries
+// are assumed refreshed against the live tables (the caller does that
+// before taking the share-count holds).
+static NTSTATUS MirrorAllWindows(UINT64 TargetVa, SM_ATTACH_OUT* Out) {
+    const ULONG pinSlot = SmPml4Index(TargetVa);
+    NTSTATUS failSt = STATUS_UNSUCCESSFUL;
+    BOOLEAN pinMirrored = FALSE;
+    ULONG mirrored = 0;
 
-    UINT64 entry = g_Mirror.TargetEntry[w];
-    UINT64 live = 0;
-    if (SmPhysReadEntry(g_Mirror.TargetKernelDtb, targetSlot, &live) &&
-        SmEntryIsPresent(live)) {
-        SM_LOGD("mirror: entry live=0x%I64x captured=0x%I64x (%s)", live, entry,
-                live == entry ? "match" : "STALE-CAPTURE");
-        if (live != entry) {
-            entry = live;
-            g_Mirror.TargetEntry[w] = live;
+    for (ULONG w = 0; w < Out->WindowCount; ++w) {
+        if (!SmEntryUserAccessible(g_Mirror.TargetEntry[w])) {
+            // Refuse to project kernel-private regions into the user half.
+            SM_LOGD("mirror: skip window %u (slot %u): supervisor-only entry",
+                    w, Out->Windows[w].TargetSlot);
+            if (Out->Windows[w].TargetSlot == pinSlot) {
+                failSt = STATUS_ACCESS_DENIED;
+                goto Rollback;
+            }
+            continue;
         }
-    } else {
-        SM_LOGD("mirror: live re-read unavailable, keeping captured");
-    }
 
-    if (!SmEntryUserAccessible(entry)) {
-        // Refuse to project kernel-private regions into the user half.
-        return STATUS_ACCESS_DENIED;
-    }
-
-    const ULONG slot = Out->Windows[w].ContainerSlot;
-    const UINT64 mirrorEntry = entry | SM_MIRROR_ENTRY_NX;
-    // Under KPTI the two writes must not be separable by an Mm operation:
-    // the section-view unmap in between walks VADs and runs the shadow
-    // audit, which bugchecks on any kernel-vs-shadow disagreement (the
-    // SM_MIRROR_ENTRY pair write keeps both mappings up before the stores).
-    UINT64 kernelWritten = 0;
-    UINT64 shadowWritten = 0;
-    if (g_Mirror.SelfShadowPhys != 0) {
-        if (!SmPhysWritePair(g_Mirror.SelfKernelDtb, slot,
-                             g_Mirror.SelfShadowPhys, slot, mirrorEntry,
-                             mirrorEntry, &kernelWritten, &shadowWritten)) {
-            SM_LOGE("mirror write: container PML4 not mappable");
-            return STATUS_UNSUCCESSFUL;
+        const ULONG slot = Out->Windows[w].ContainerSlot;
+        const UINT64 mirrorEntry = g_Mirror.TargetEntry[w] | SM_MIRROR_ENTRY_NX;
+        // Per-window pair write: both mappings exist before either store,
+        // so Mm never observes the two tables disagreeing (finding 27);
+        // across windows the tables agree slot-by-slot at every point.
+        UINT64 kernelWritten = 0;
+        UINT64 shadowWritten = 0;
+        BOOLEAN ok = FALSE;
+        if (g_Mirror.SelfShadowPhys != 0) {
+            ok = SmPhysWritePair(g_Mirror.SelfKernelDtb, slot,
+                                 g_Mirror.SelfShadowPhys, slot, mirrorEntry,
+                                 mirrorEntry, &kernelWritten, &shadowWritten);
+            ok = ok && kernelWritten == mirrorEntry &&
+                 shadowWritten == mirrorEntry;
+        } else {
+            kernelWritten = mirrorEntry;
+            ok = SmPhysWriteEntry(g_Mirror.SelfKernelDtb, slot, mirrorEntry,
+                                  &kernelWritten) &&
+                 kernelWritten == mirrorEntry;
         }
-        if (kernelWritten != mirrorEntry || shadowWritten != mirrorEntry) {
+        if (!ok) {
             SM_LOGE(
-                "mirror: PXE[%u] WRITE-LOST (kernel=0x%I64x "
-                "shadow=0x%I64x want=0x%I64x)",
+                "mirror: PXE[%u] WRITE-LOST (kernel=0x%I64x shadow=0x%I64x "
+                "want=0x%I64x)",
                 slot, kernelWritten, shadowWritten, mirrorEntry);
-            return STATUS_UNSUCCESSFUL;
+            goto Rollback;
         }
-        SM_LOGD("mirror: PXE[%u] kernel+shadow verified live=0x%I64x", slot,
-                kernelWritten);
-    } else {
-        kernelWritten = mirrorEntry;
-        if (!SmPhysWriteEntry(g_Mirror.SelfKernelDtb, slot, mirrorEntry,
-                              &kernelWritten)) {
-            SM_LOGE("mirror write: container PML4 not mappable");
-            return STATUS_UNSUCCESSFUL;
+        g_Mirror.Mirrored[w] = TRUE;
+        ++mirrored;
+        if (Out->Windows[w].TargetSlot == pinSlot) {
+            pinMirrored = TRUE;
         }
-        if (kernelWritten != mirrorEntry) {
-            SM_LOGE("mirror: PXE[%u] WRITE-LOST (back=0x%I64x want=0x%I64x)",
-                    slot, kernelWritten, mirrorEntry);
-            return STATUS_UNSUCCESSFUL;
-        }
-        SM_LOGD("mirror: PXE[%u] kernel verified live=0x%I64x", slot,
-                kernelWritten);
+        SM_LOGD("mirror: PXE[%u] <- target slot %u (verified live=0x%I64x)",
+                slot, Out->Windows[w].TargetSlot, kernelWritten);
+    }
+
+    if (!pinMirrored) {
+        goto Rollback;
     }
 
     // Visibility: a stale not-present walk entry survives INVLPG (finding
@@ -198,13 +213,16 @@ static NTSTATUS MirrorSingleWindow(UINT64 TargetVa, SM_ATTACH_OUT* Out) {
     // path needs a broadcast flush.
     SmKptiFlushAfterWrite(g_Mirror.SelfShadowPhys != 0);
     g_Mirror.MirroredActive = TRUE;
-    g_Mirror.MirroredWindow = w;
     Out->Flags |= SM_FLAG_WRITE_ENABLED;
-    SM_LOGD(
-        "mirror ON: window %u (target slot %u -> container slot %u), "
-        "watchdog %us",
-        w, targetSlot, slot, SM_WATCHDOG_SECONDS);
+    SM_LOGD("mirror ON: %u/%u windows (pin slot %u), watchdog %us", mirrored,
+            Out->WindowCount, pinSlot, SM_WATCHDOG_SECONDS);
     return STATUS_SUCCESS;
+
+Rollback:
+    ZeroMirroredSlots(Out->Windows, Out->WindowCount);
+    RtlZeroMemory(g_Mirror.Mirrored, sizeof(g_Mirror.Mirrored));
+    SmKptiFlushAfterWrite(g_Mirror.SelfShadowPhys != 0);
+    return failSt;
 }
 #endif  // SM_ENABLE_WRITE
 
@@ -358,6 +376,25 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out) {
     }
     Out->Flags = SM_FLAG_DRY_RUN;
 
+#if SM_ENABLE_WRITE
+    // Refresh the captured entries against the live tables BEFORE the
+    // share-count holds: the bump, the mirror write and the later detach
+    // drop must all reference the same physical page -- a stale capture
+    // would bump the old page and drop the new one (leaked count on one,
+    // unheld projection of the other).
+    for (ULONG w = 0; w < Out->WindowCount; ++w) {
+        UINT64 live = 0;
+        if (SmPhysReadEntry(g_Mirror.TargetKernelDtb,
+                            Out->Windows[w].TargetSlot, &live) &&
+            SmEntryIsPresent(live) && live != g_Mirror.TargetEntry[w]) {
+            SM_LOGD(
+                "mirror: window %u (slot %u) STALE-CAPTURE 0x%I64x -> 0x%I64x",
+                w, Out->Windows[w].TargetSlot, g_Mirror.TargetEntry[w], live);
+            g_Mirror.TargetEntry[w] = live;
+        }
+    }
+#endif
+
     // P2: hold the page-table pages the captured entries reference. All
     // bumps succeed or the partial set is rolled back and attach fails.
     ULONG bumped = 0;
@@ -381,12 +418,13 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out) {
     // mirror is live).
     KeInitializeEvent(&g_Mirror.WatchdogStop, NotificationEvent, FALSE);
     g_Mirror.MirroredActive = FALSE;
+    RtlZeroMemory(g_Mirror.Mirrored, sizeof(g_Mirror.Mirrored));
     if (targetVa == 0) {
         // Protocol: TargetVa == 0 means plan only. Mirroring an arbitrary
         // slot (index 0 of a null VA) would be a silent mistake.
         SM_LOG("write build: no TargetVa given plan only");
     } else {
-        st = MirrorSingleWindow(targetVa, Out);
+        st = MirrorAllWindows(targetVa, Out);
         if (!NT_SUCCESS(st)) {
             // The share-count bumps above are already held: roll them back
             // before bailing out (balance invariant, ground rule 4).
@@ -477,28 +515,13 @@ NTSTATUS SmMirrorDetach(VOID) {
     if (g_Mirror.Attached) {
 #if SM_ENABLE_WRITE
         if (g_Mirror.MirroredActive) {
-            // Rollback: zero the mirrored slot in the container's REAL
+            // Rollback: zero every mirrored slot in the container's REAL
             // PML4 page(s) through the truth path (physical, works from
             // any context: watchdog, process notify). Threads on other
             // CPUs may still hold stale translations and AV by design
             // (P5, research scope).
-            const ULONG slot =
-                g_Mirror.Windows[g_Mirror.MirroredWindow].ContainerSlot;
-            UINT64 zero = 0;
-            UINT64 shadowZero = 0;
-            if (g_Mirror.SelfShadowPhys != 0) {
-                // Pair-zeroed for the same reason the writes are paired:
-                // the audit must never see one side cleared and the other
-                // still holding the foreign entry.
-                if (!SmPhysWritePair(g_Mirror.SelfKernelDtb, slot,
-                                     g_Mirror.SelfShadowPhys, slot, 0, 0, &zero,
-                                     &shadowZero)) {
-                    SM_LOGE("detach zero: container PML4 not mappable");
-                }
-            } else if (!SmPhysWriteEntry(g_Mirror.SelfKernelDtb, slot, 0,
-                                         &zero)) {
-                SM_LOGE("detach zero: container PML4 not mappable");
-            }
+            ZeroMirroredSlots(g_Mirror.Windows, g_Mirror.WindowCount);
+            RtlZeroMemory(g_Mirror.Mirrored, sizeof(g_Mirror.Mirrored));
             SmKptiFlushAfterWrite(g_Mirror.SelfShadowPhys != 0);
             g_Mirror.MirroredActive = FALSE;
         }

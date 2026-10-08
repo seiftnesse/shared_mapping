@@ -21,8 +21,9 @@ int main(void) {
     }
     FillMarker("initial");
 
-    printf("SM_TARGET_READY pid=%lu buffer=%p\n", GetCurrentProcessId(),
-           (void*)g_buffer);
+    printf("SM_TARGET_READY pid=%lu buffer=%p image=%p\n",
+           GetCurrentProcessId(), (void*)g_buffer,
+           (void*)GetModuleHandle(NULL));
     printf("marker: %s\n", g_buffer);
     printf(
         "commands: [p] print [t] trim working set [a] auto-trim 20x "

@@ -78,17 +78,22 @@ static void PrintBalance(HANDLE device) {
     }
 }
 
-static BOOL RunMirror(HANDLE device, SM_ATTACH_OUT* out, unsigned long long va,
-                      BOOL doWrite, unsigned long long bench) {
-    // Find the window containing va and translate it (P1 shift formula).
-    unsigned long long translated = 0;
+// Translates a TARGET-space va into the container through the window plan
+// (P1 shift formula); 0 when no window covers it.
+static unsigned long long TranslateVa(const SM_ATTACH_OUT* out,
+                                      unsigned long long va) {
     for (unsigned i = 0; i < out->WindowCount && i < SM_USER_SLOT_COUNT; ++i) {
         if (out->Windows[i].TargetSlot == SmPml4Index(va)) {
-            translated = SmSlotBase(out->Windows[i].ContainerSlot) |
-                         (va & (SM_SLOT_SIZE - 1));
-            break;
+            return SmSlotBase(out->Windows[i].ContainerSlot) |
+                   (va & (SM_SLOT_SIZE - 1));
         }
     }
+    return 0;
+}
+
+static BOOL RunMirror(HANDLE device, SM_ATTACH_OUT* out, unsigned long long va,
+                      BOOL doWrite, unsigned long long bench) {
+    const unsigned long long translated = TranslateVa(out, va);
     if (translated == 0) {
         wprintf(L"translate: no window for slot %u\n", SmPml4Index(va));
         return FALSE;
@@ -132,6 +137,29 @@ static BOOL RunMirror(HANDLE device, SM_ATTACH_OUT* out, unsigned long long va,
     return TRUE;
 }
 
+// Reads a foreign (non-pinned) target va through the mirror. The page is
+// NOT share-count pinned: a non-resident page faults fatally in the
+// VAD-less container (finding 5), so probe only addresses that are
+// almost certainly resident (e.g. image headers).
+static void ProbeWindow(const SM_ATTACH_OUT* out, unsigned long long va) {
+    const unsigned long long translated = TranslateVa(out, va);
+    if (translated == 0) {
+        wprintf(L"probe: no window for slot %u\n", SmPml4Index(va));
+        return;
+    }
+    wprintf(L"probe: target va 0x%llx -> container va 0x%llx\n", va,
+            translated);
+    SmExpectedVa = (const void*)translated;
+
+    char buf[17];
+    memset(buf, 0, sizeof(buf));
+    if (SafeRead((const void*)translated, buf, 16)) {
+        wprintf(L"probe: \"%hs\"\n", buf);
+    } else {
+        wprintf(L"probe: ACCESS VIOLATION (page not resident?)\n");
+    }
+}
+
 // One launch's parameters, filled by wmain: keeps the function signatures
 // small and the flag parsing local to one place.
 struct RunOptions {
@@ -140,6 +168,7 @@ struct RunOptions {
     unsigned long long pinLength = 4096;
     unsigned long long warmupBytes = 0;  // >0: run the residency-audit IOCTL
     unsigned long long bench = 0;
+    unsigned long long probe = 0;
     bool write = false;
     bool hold = false;
 };
@@ -194,6 +223,9 @@ static BOOL AttachAndRun(const RunOptions& opt) {
                 Warmup(device, opt.va, opt.warmupBytes);
             }
             RunMirror(device, &out, opt.va, opt.write, opt.bench);
+            if (opt.probe != 0) {
+                ProbeWindow(&out, opt.probe);
+            }
         } else {
             wprintf(L"write build active but no va given: plan only\n");
         }
@@ -235,6 +267,8 @@ int wmain(int argc, wchar_t** argv) {
             opt.warmupBytes = _wcstoui64(argv[++i], nullptr, 10);
         } else if (wcscmp(argv[i], L"--len") == 0 && i + 1 < argc) {
             opt.pinLength = _wcstoui64(argv[++i], nullptr, 10);
+        } else if (wcscmp(argv[i], L"--probe") == 0 && i + 1 < argc) {
+            opt.probe = _wcstoui64(argv[++i], nullptr, 16);
         } else if (wcscmp(argv[i], L"--hold") == 0) {
             opt.hold = true;
         }
@@ -242,7 +276,8 @@ int wmain(int argc, wchar_t** argv) {
     if (opt.pid == 0) {
         wprintf(
             L"usage: container --pid <pid> [--va <hex-va>] [--write] "
-            L"[--bench N] [--len bytes] [--warmup bytes] [--hold]\n");
+            L"[--bench N] [--len bytes] [--warmup bytes] [--probe <hex-va>] "
+            L"[--hold]\n");
         return 2;
     }
     return AttachAndRun(opt) ? 0 : 1;

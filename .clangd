@@ -1,2 +1,2 @@
 CompileFlags:
-  CompilationDatabase: build/clang-debug
+  CompilationDatabase: build/clang-release-write
