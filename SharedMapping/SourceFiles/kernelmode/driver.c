@@ -159,10 +159,15 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject,
     if (!NT_SUCCESS(st)) {
         return st;
     }
-    st = SmPfnInit(offsets);
-    if (!NT_SUCCESS(st)) {
-        SM_LOGE("pfn share counts unavailable: 0x%lx", (ULONG)st);
-        st = STATUS_SUCCESS;
+    // Unsupported build: the device stays up (GETINFO works, attach
+    // refuses via its g_Offsets check); SmPfnInit would dereference the
+    // NULL offset table.
+    if (offsets != NULL) {
+        st = SmPfnInit(offsets);
+        if (!NT_SUCCESS(st)) {
+            SM_LOGE("pfn share counts unavailable: 0x%lx", (ULONG)st);
+            st = STATUS_SUCCESS;
+        }
     }
 
     UNICODE_STRING deviceName;
@@ -196,6 +201,10 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject,
     }
 
     device->Flags &= ~DO_DEVICE_INITIALIZING;
+#if SM_ENABLE_WRITE
+    SM_LOG0("loaded (write build: page-table writes enabled)");
+#else
     SM_LOG0("loaded (dry-run)");
+#endif
     return STATUS_SUCCESS;
 }

@@ -78,8 +78,8 @@ static inline uint64_t SmSlotBase(uint32_t slot) {
 }
 
 // Returns the same va expressed inside `to_slot`; 0 when va does not live
-// in `from_slot`. Note the collision: va == 0 remapped into slot 0 also
-// returns 0 callers always operate on non-null target addresses.
+// in `from_slot`. The va == 0 collision (slot 0 remapped into slot 0) is
+// harmless: callers always operate on non-null target addresses.
 static inline uint64_t SmRemapVa(uint64_t va, uint32_t from_slot,
                                  uint32_t to_slot) {
     if (SmPml4Index(va) != from_slot) {

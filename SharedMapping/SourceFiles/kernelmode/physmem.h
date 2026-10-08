@@ -5,6 +5,12 @@
 
 #include "common/paging_entry.h"
 
+// The write primitives below are compiled only in the write-gated build
+// (roadmap ground rule 2: no page-table write code in dry builds).
+#ifndef SM_ENABLE_WRITE
+#define SM_ENABLE_WRITE 0
+#endif
+
 // Truth-path access to physical pages of page tables: the
 // \Device\PhysicalMemory section view reads the LIVE page tables, while
 // MmCopyMemory point reads and the direct-map alias returned stale
@@ -26,14 +32,15 @@ BOOLEAN SmPhysInRam(UINT64 Phys);
 // Reads one page-table entry. FALSE when the page is not mappable.
 BOOLEAN SmPhysReadEntry(UINT64 TablePhys, ULONG Index, UINT64* Value);
 
+// Reads Count entries starting at Start. FALSE when unreadable.
+BOOLEAN SmPhysReadEntries(UINT64 TablePhys, ULONG Start, ULONG Count,
+                          UINT64* Out);
+
+#if SM_ENABLE_WRITE
 // Writes one entry and reads it back through the same mapping: *Written
 // holds the post-write value (the write's verdict), FALSE on map failure.
 BOOLEAN SmPhysWriteEntry(UINT64 TablePhys, ULONG Index, UINT64 Value,
                          UINT64* Written);
-
-// Reads Count entries starting at Start. FALSE when unreadable.
-BOOLEAN SmPhysReadEntries(UINT64 TablePhys, ULONG Start, ULONG Count,
-                          UINT64* Out);
 
 // Writes two entries in DIFFERENT pages back to back with the mappings
 // established BEFORE either store and released after both: Mm operations
@@ -44,5 +51,6 @@ BOOLEAN SmPhysReadEntries(UINT64 TablePhys, ULONG Start, ULONG Count,
 BOOLEAN SmPhysWritePair(UINT64 TablePhysA, ULONG IndexA, UINT64 TablePhysB,
                         ULONG IndexB, UINT64 ValueA, UINT64 ValueB,
                         UINT64* WrittenA, UINT64* WrittenB);
+#endif  // SM_ENABLE_WRITE
 
 #endif  // PHYSMEM_H_

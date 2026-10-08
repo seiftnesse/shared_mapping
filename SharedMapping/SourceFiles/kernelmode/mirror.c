@@ -286,7 +286,7 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out) {
 #if SM_ENABLE_WRITE
     UINT64* pinnedPfns = NULL;
     ULONG pinnedCount = 0;
-    if (In->TargetVa != 0) {
+    if (targetVa != 0) {
         // Everything below runs on physical memory. The pin resolves each
         // page of the range through the truth path and takes a share-count
         // hold on the data frame (the same primitive MmProbeAndLockPages
@@ -376,13 +376,16 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out) {
         goto Cleanup;
     }
 #if SM_ENABLE_WRITE
+    // Initialized on every attach: detach may signal it for plan-only
+    // attaches too (the watchdog thread itself only exists while a
+    // mirror is live).
+    KeInitializeEvent(&g_Mirror.WatchdogStop, NotificationEvent, FALSE);
     g_Mirror.MirroredActive = FALSE;
     if (targetVa == 0) {
         // Protocol: TargetVa == 0 means plan only. Mirroring an arbitrary
         // slot (index 0 of a null VA) would be a silent mistake.
         SM_LOG("write build: no TargetVa given plan only");
     } else {
-        KeInitializeEvent(&g_Mirror.WatchdogStop, NotificationEvent, FALSE);
         st = MirrorSingleWindow(targetVa, Out);
         if (!NT_SUCCESS(st)) {
             // The share-count bumps above are already held: roll them back
@@ -424,18 +427,23 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out) {
     target = NULL;
 
 #if SM_ENABLE_WRITE
-    HANDLE thread = NULL;
-    OBJECT_ATTRIBUTES threadAttr;
-    InitializeObjectAttributes(&threadAttr, NULL, OBJ_KERNEL_HANDLE, NULL,
-                               NULL);
-    st = PsCreateSystemThread(&thread, THREAD_ALL_ACCESS, &threadAttr, NULL,
-                              NULL, WatchdogThread, NULL);
-    if (NT_SUCCESS(st)) {
-        ZwClose(thread);  // detached watchdog: no handle retention
-        st = STATUS_SUCCESS;
-    } else {
-        SM_LOGE("watchdog thread failed: 0x%lx", (ULONG)st);
-        st = STATUS_SUCCESS;  // mirror stays; client detach still works
+    // The watchdog bounds LIVE-MIRROR exposure only. Plan-only attaches
+    // hold just share counts: the client detach and the process-exit
+    // notify already cover their cleanup, exactly like dry builds.
+    if (g_Mirror.MirroredActive) {
+        HANDLE thread = NULL;
+        OBJECT_ATTRIBUTES threadAttr;
+        InitializeObjectAttributes(&threadAttr, NULL, OBJ_KERNEL_HANDLE, NULL,
+                                   NULL);
+        st = PsCreateSystemThread(&thread, THREAD_ALL_ACCESS, &threadAttr, NULL,
+                                  NULL, WatchdogThread, NULL);
+        if (NT_SUCCESS(st)) {
+            ZwClose(thread);  // detached watchdog: no handle retention
+            st = STATUS_SUCCESS;
+        } else {
+            SM_LOGE("watchdog thread failed: 0x%lx", (ULONG)st);
+            st = STATUS_SUCCESS;  // mirror stays; client detach still works
+        }
     }
 #endif
 

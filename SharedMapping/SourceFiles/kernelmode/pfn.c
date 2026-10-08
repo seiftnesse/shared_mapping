@@ -3,6 +3,7 @@
 
 #include "common/pml4.h"
 #include "pfn.h"
+#include "physmem.h"
 
 // - Geoff Chappell, "_MMPFN" (geoffchappell.com/studies/windows/km/ntoskrnl/inc/ntos/mi/mmpfn):
 // MmPfnDatabase is a POINTER variable; on Win10+ the
@@ -78,34 +79,13 @@ static VOID SmPfnUnlock(volatile LONG64* Field) {
     InterlockedAnd64(Field, ~(1LL << 63));
 }
 
-// True when PhysPage falls into a physical RAM range. The share-count
-// bump/drop computes the _MMPFN address as database + frame*0x30 without
-// any other bounds knowledge: a wild entry phys (beyond the highest frame)
-// would read/write past the database and bugcheck (0x3B), so callers
-// must pre-validate.
-static BOOLEAN SmPhysIsRam(UINT64 Phys) {
-    PPHYSICAL_MEMORY_RANGE ranges = MmGetPhysicalMemoryRanges();
-    if (ranges == NULL) {
-        return FALSE;
-    }
-    BOOLEAN inRam = FALSE;
-    for (ULONG i = 0; ranges[i].BaseAddress.QuadPart != 0 ||
-                      ranges[i].NumberOfBytes.QuadPart != 0;
-         ++i) {
-        const UINT64 base = (UINT64)ranges[i].BaseAddress.QuadPart;
-        const UINT64 end = base + (UINT64)ranges[i].NumberOfBytes.QuadPart;
-        if (Phys >= base && Phys < end) {
-            inRam = TRUE;
-            break;
-        }
-    }
-    ExFreePool(ranges);
-    return inRam;
-}
-
+// The _MMPFN address below is computed as database + frame*element size
+// with no other bounds knowledge: a phys outside every RAM range would be
+// a frame beyond the database and the RMW would bugcheck (0x3B, finding
+// 14), hence the SmPhysInRam pre-validation.
 static NTSTATUS AdjustShareCount(UINT64 PhysPage, LONG Delta) {
     if (g_PfnDatabase == NULL || (PhysPage & 0xFFF) != 0 ||
-        !SmPhysIsRam(PhysPage)) {
+        !SmPhysInRam(PhysPage)) {
         return STATUS_NOT_SUPPORTED;
     }
     volatile LONG64* field =

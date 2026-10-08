@@ -11,7 +11,8 @@
       "cacheVariables": {
         "BUILD_UM": "ON",
         "BUILD_KM": "ON",
-        "BUILD_TESTS": "ON"
+        "BUILD_TESTS": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
     },
     {
@@ -27,14 +28,27 @@
       "inherits": "clang-base",
       "binaryDir": "${sourceDir}/build/clang-release",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "clang-release-write",
+      "displayName": "clang-cl",
+      "inherits": "clang-base",
+      "binaryDir": "${sourceDir}/build/clang-release-write",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SM_ENABLE_WRITE": "ON",
+        "SM_ENABLE_PFN_REFCOUNT": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "clang-debug",   "configurePreset": "clang-debug" },
-    { "name": "clang-release", "configurePreset": "clang-release" }
+    { "name": "clang-release", "configurePreset": "clang-release" },
+    { "name": "clang-release-write", "configurePreset": "clang-release-write" }
   ],
   "testPresets": [
     { "name": "clang-debug",   "configurePreset": "clang-debug" },
-    { "name": "clang-release", "configurePreset": "clang-release" }
+    { "name": "clang-release", "configurePreset": "clang-release" },
+    { "name": "clang-release-write", "configurePreset": "clang-release-write" }
   ]
 }

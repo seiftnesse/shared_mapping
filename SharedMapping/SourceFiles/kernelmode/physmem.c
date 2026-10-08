@@ -131,6 +131,7 @@ BOOLEAN SmPhysReadEntry(UINT64 TablePhys, ULONG Index, UINT64* Value) {
     return TRUE;
 }
 
+#if SM_ENABLE_WRITE
 BOOLEAN SmPhysWriteEntry(UINT64 TablePhys, ULONG Index, UINT64 Value,
                          UINT64* Written) {
     UCHAR mdlBuf[sizeof(MDL) + sizeof(PFN_NUMBER)] = {0};
@@ -155,6 +156,7 @@ BOOLEAN SmPhysWriteEntry(UINT64 TablePhys, ULONG Index, UINT64 Value,
     SmPhysUnmapPage(&map);
     return TRUE;
 }
+#endif  // SM_ENABLE_WRITE
 
 BOOLEAN SmPhysReadEntries(UINT64 TablePhys, ULONG Start, ULONG Count,
                           UINT64* Out) {
@@ -181,6 +183,7 @@ BOOLEAN SmPhysReadEntries(UINT64 TablePhys, ULONG Start, ULONG Count,
     return ok;
 }
 
+#if SM_ENABLE_WRITE
 BOOLEAN SmPhysWritePair(UINT64 TablePhysA, ULONG IndexA, UINT64 TablePhysB,
                         ULONG IndexB, UINT64 ValueA, UINT64 ValueB,
                         UINT64* WrittenA, UINT64* WrittenB) {
@@ -217,3 +220,4 @@ BOOLEAN SmPhysWritePair(UINT64 TablePhysA, ULONG IndexA, UINT64 TablePhysB,
     SmPhysUnmapPage(&mapA);
     return TRUE;
 }
+#endif  // SM_ENABLE_WRITE

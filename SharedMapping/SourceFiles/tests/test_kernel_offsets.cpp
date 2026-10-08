@@ -18,6 +18,9 @@ TEST(KernelOffsets, KnownHostRowMatchesPdb) {
     EXPECT_EQ(row->MmpfnShareCountOffset, 0x18u);
     EXPECT_EQ(row->MmpfnShareCountShift, 0u);
     EXPECT_EQ(row->MmPfnDatabasePointerRva, 0xcfc510u);
+    EXPECT_EQ(row->VmOffset, 0x680u);
+    EXPECT_EQ(row->MmSupportSharedOffset, 0xc0u);
+    EXPECT_EQ(row->ShadowMappingOffset, 0x48u);
 }
 
 TEST(KernelOffsets, UnknownBuildIsRejected) {
@@ -28,7 +31,8 @@ TEST(KernelOffsets, UnknownBuildIsRejected) {
 // Structural sanity of every row: offsets inside their structures, 8-byte
 // alignment where the hardware requires it, unique runtime keys. The
 // shadow-PML4 chain (Vm -> Shared -> ShadowMapping) offsets come from the
-// PDB (llvm-pdbutil, see tools/dump-offsets.ps1) and are pinned here.
+// PDB (llvm-pdbutil, see tools/dump-offsets.ps1); their exact values are
+// per-build and pinned per row in KnownHostRowMatchesPdb.
 TEST(KernelOffsets, RowsAreSane) {
     constexpr uint32_t count = std::size(SM_KernelOffsetTable);
     ASSERT_GT(count, 0u);
@@ -41,9 +45,11 @@ TEST(KernelOffsets, RowsAreSane) {
         EXPECT_LT(row.MmpfnShareCountOffset, row.MmpfnElementSize);
         EXPECT_LT(row.MmpfnShareCountShift, 64u);
         EXPECT_GT(row.MmPfnDatabasePointerRva, 0u);
-        EXPECT_EQ(row.VmOffset, 0x680u);
-        EXPECT_EQ(row.MmSupportSharedOffset, 0xc0u);
-        EXPECT_EQ(row.ShadowMappingOffset, 0x48u);
+        // The attach path refuses a zero shadow-chain offset (truncated
+        // table), so a zero in any row makes the row unusable.
+        EXPECT_GT(row.VmOffset, 0u);
+        EXPECT_GT(row.MmSupportSharedOffset, 0u);
+        EXPECT_GT(row.ShadowMappingOffset, 0u);
         for (uint32_t j = i + 1; j < count; ++j) {
             EXPECT_FALSE(SM_KernelOffsetTable[j].OsBuild == row.OsBuild &&
                          SM_KernelOffsetTable[j].Ubr == row.Ubr)

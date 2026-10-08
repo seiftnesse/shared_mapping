@@ -21,16 +21,6 @@ endif()
 if(SM_ENABLE_PFN_REFCOUNT)
     target_compile_definitions(shared_mapping_driver PRIVATE SM_ENABLE_PFN_REFCOUNT=1)
 endif()
-nice_target_sources(shared_mapping_driver ${SF} PRIVATE
-    kernelmode/driver.c
-    kernelmode/kpti.c
-    kernelmode/mirror.c
-    kernelmode/physmem.c
-    kernelmode/pfn.c
-    kernelmode/plan.c
-    kernelmode/selftest.c
-    kernelmode/target_process.c
-)
 
 option(SM_SIGN_DRIVER "Test-sign the driver after each build (tools/sign.bat)" ON)
 if(SM_SIGN_DRIVER)

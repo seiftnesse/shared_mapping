@@ -138,7 +138,7 @@ struct RunOptions {
     ULONG pid = 0;
     unsigned long long va = 0;
     unsigned long long pinLength = 4096;
-    unsigned long long warmupBytes = 0;  // the driver pin faults pages in
+    unsigned long long warmupBytes = 0;  // >0: run the residency-audit IOCTL
     unsigned long long bench = 0;
     bool write = false;
     bool hold = false;

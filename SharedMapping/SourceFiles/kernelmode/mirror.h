@@ -12,9 +12,11 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out);
 
 NTSTATUS SmMirrorDetach(VOID);
 
-// Faults the target range in through the target's own VAD tree (pitfall
-// P3) so the pages become reachable via the mirror. Attaches to the target
-// process; SMAP-safe around the probes.
+// Residency audit for the target range: every page is resolved through
+// the truth path. A foreign page cannot be faulted in without entering
+// the owner's context (pitfall P3), so a non-resident page is reported
+// and the target must touch its own buffer. Succeeds only when every
+// page of the range is resident.
 NTSTATUS SmMirrorWarmup(const SM_WARMUP_IN* In);
 
 NTSTATUS SmMirrorGetInfo(SM_INFO_OUT* Out);

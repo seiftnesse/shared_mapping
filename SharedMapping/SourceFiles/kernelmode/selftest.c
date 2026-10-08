@@ -21,9 +21,8 @@ static __inline VOID SmClac(VOID) {
 // Walks Va from Dtb through the truth path, logging every level.
 static UINT64 SmWalkAndLog(const CHAR* Tag, UINT64 Dtb, UINT64 Va) {
     static const CHAR* names[4] = {"PXE", "PPE", "PDE", "PTE"};
-    const UINT32 idx[4] = {
-        (UINT32)((Va >> 39) & 0x1FFu), (UINT32)((Va >> 30) & 0x1FFu),
-        (UINT32)((Va >> 21) & 0x1FFu), (UINT32)((Va >> 12) & 0x1FFu)};
+    const UINT32 idx[4] = {SmPml4Index(Va), SmPdptIndex(Va), SmPdIndex(Va),
+                           SmPtIndex(Va)};
     UINT64 table = Dtb;
     UINT64 leafPhys = 0;
     for (ULONG level = 0; level < 4; ++level) {
@@ -87,44 +86,12 @@ VOID SmSelfTestRun(UINT64 TargetVa, const SM_ATTACH_OUT* Out, UINT64 PinnedPhys,
         SM_LOGD("selftest: pinned page phys 0x%I64x", PinnedPhys);
     }
 
-    // Walk the live chain level by level through the truth path.
-    UINT64 hwLeaf = 0;
-    {
-        static const CHAR* hn[4] = {"PXE", "PPE", "PDE", "PTE"};
-        UINT64 val = 0;
-        if (!SmPhysReadEntry(Ctx->TargetKernelDtb, targetSlot, &val)) {
-            SM_LOGD("selftest: target mdl PXE unreadable");
-        }
-        for (ULONG lvl = 0; lvl < 4; ++lvl) {
-            if (lvl > 0) {
-                UINT64 scratch = val;
-                const UINT32 idx = (lvl == 1)   ? SmPdptIndex(TargetVa)
-                                   : (lvl == 2) ? SmPdIndex(TargetVa)
-                                                : SmPtIndex(TargetVa);
-                if (!SmPhysReadEntry(SmCr3ToPhys(scratch), idx, &val)) {
-                    SM_LOGD("selftest: target mdl %s unreadable", hn[lvl]);
-                    break;
-                }
-            }
-            SM_LOGD("selftest: target mdl %s = 0x%I64x", hn[lvl], val);
-            if (!SmEntryIsPresent(val)) {
-                SM_LOGD("selftest: target mdl chain not present at %s",
-                        hn[lvl]);
-                break;
-            }
-            if (lvl < 3 && SmEntryIsLarge(val)) {
-                const UINT64 mask =
-                    (lvl == 1) ? (SM_REGION_PDPTE - 1) : (SM_REGION_PDE - 1);
-                hwLeaf = SmEntryPhys(val) + (TargetVa & mask);
-                break;
-            }
-            if (lvl == 3) {
-                hwLeaf = SmEntryPhys(val) + (TargetVa & (SM_REGION_PTE - 1));
-            }
-        }
-    }
+    // Full level-by-level walk of the live target chain; SmWalkAndLog
+    // logs every level, so its leaf needs no second walk.
+    const UINT64 hwLeaf =
+        SmWalkAndLog("target", Ctx->TargetKernelDtb, TargetVa);
     if (hwLeaf != 0 && PinnedPhys != 0) {
-        SM_LOGD("selftest: mdl leaf 0x%I64x pinned 0x%I64x (%s)", hwLeaf,
+        SM_LOGD("selftest: target leaf 0x%I64x pinned 0x%I64x (%s)", hwLeaf,
                 PinnedPhys,
                 (hwLeaf >> 12) == (PinnedPhys >> 12) ? "match" : "MISMATCH");
     }
@@ -147,7 +114,6 @@ VOID SmSelfTestRun(UINT64 TargetVa, const SM_ATTACH_OUT* Out, UINT64 PinnedPhys,
                 liveNow == Ctx->CapturedEntry ? "match" : "CHANGED");
         }
     }
-    SmWalkAndLog("target", Ctx->TargetKernelDtb, TargetVa);
     // Under KPTI the user CR3 walks the ShadowMapping table, resolved at
     // attach time; there is no need to enter the target context to see it.
     if (va == 0) {
