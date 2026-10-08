@@ -21,6 +21,8 @@ TEST(KernelOffsets, KnownHostRowMatchesPdb) {
     EXPECT_EQ(row->VmOffset, 0x680u);
     EXPECT_EQ(row->MmSupportSharedOffset, 0xc0u);
     EXPECT_EQ(row->ShadowMappingOffset, 0x48u);
+    EXPECT_EQ(row->SectionBaseAddressOffset, 0x520u);
+    EXPECT_EQ(row->PebOffset, 0x550u);
 }
 
 TEST(KernelOffsets, UnknownBuildIsRejected) {
@@ -50,6 +52,10 @@ TEST(KernelOffsets, RowsAreSane) {
         EXPECT_GT(row.VmOffset, 0u);
         EXPECT_GT(row.MmSupportSharedOffset, 0u);
         EXPECT_GT(row.ShadowMappingOffset, 0u);
+        EXPECT_GT(row.SectionBaseAddressOffset, 0u);
+        EXPECT_EQ(row.SectionBaseAddressOffset % 8u, 0u);
+        EXPECT_GT(row.PebOffset, 0u);
+        EXPECT_EQ(row.PebOffset % 8u, 0u);
         for (uint32_t j = i + 1; j < count; ++j) {
             EXPECT_FALSE(SM_KernelOffsetTable[j].OsBuild == row.OsBuild &&
                          SM_KernelOffsetTable[j].Ubr == row.Ubr)

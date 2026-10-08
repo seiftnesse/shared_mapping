@@ -66,6 +66,12 @@ typedef struct _SM_ATTACH_OUT {
     uint32_t Flags;
     uint64_t TargetKernelDtb;
     uint64_t TargetUserDtb;  // non-zero => KVA shadow enabled for the target
+    // Exe image base (EPROCESS.SectionBaseAddress) for probing image
+    // headers through the mirror; 0 when the offset table lacks it.
+    uint64_t TargetImageBase;
+    // PEB va of the target, the entry point of the client's module walk;
+    // 0 when the offset table lacks it.
+    uint64_t TargetPeb;
     SM_WINDOW_MAPPING Windows[SM_USER_SLOT_COUNT];
 } SM_ATTACH_OUT;
 
@@ -86,7 +92,7 @@ typedef struct _SM_INFO_OUT {
 
 #pragma pack(pop)
 
-SM_STATIC_ASSERT(offsetof(SM_ATTACH_OUT, Windows) == 24, "wire layout pin");
+SM_STATIC_ASSERT(offsetof(SM_ATTACH_OUT, Windows) == 40, "wire layout pin");
 SM_STATIC_ASSERT(sizeof(SM_ATTACH_IN) == 24, "wire layout pin");
 SM_STATIC_ASSERT(sizeof(SM_INFO_OUT) == 32, "wire layout pin");
 

@@ -5,6 +5,8 @@
 
 #include "common/driver_protocol.h"
 #include "common/pml4.h"
+#include "ldr_walk.h"
+#include "mirror_view.h"
 
 static volatile const void* SmExpectedVa;
 
@@ -18,24 +20,6 @@ static LONG WINAPI SmVectoredLogger(struct _EXCEPTION_POINTERS* Info) {
             (const void*)info[1], SmExpectedVa);
     fflush(stderr);
     return EXCEPTION_CONTINUE_SEARCH;
-}
-
-static BOOL SafeRead(const void* Address, void* Buffer, size_t Size) {
-    __try {
-        memcpy(Buffer, Address, Size);
-        return TRUE;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return FALSE;
-    }
-}
-
-static BOOL SafeWrite(void* Address, const void* Buffer, size_t Size) {
-    __try {
-        memcpy(Address, Buffer, Size);
-        return TRUE;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return FALSE;
-    }
 }
 
 static unsigned long long BenchRead(const volatile unsigned long long* Address,
@@ -78,22 +62,11 @@ static void PrintBalance(HANDLE device) {
     }
 }
 
-// Translates a TARGET-space va into the container through the window plan
-// (P1 shift formula); 0 when no window covers it.
-static unsigned long long TranslateVa(const SM_ATTACH_OUT* out,
-                                      unsigned long long va) {
-    for (unsigned i = 0; i < out->WindowCount && i < SM_USER_SLOT_COUNT; ++i) {
-        if (out->Windows[i].TargetSlot == SmPml4Index(va)) {
-            return SmSlotBase(out->Windows[i].ContainerSlot) |
-                   (va & (SM_SLOT_SIZE - 1));
-        }
-    }
-    return 0;
-}
-
+// Translates a TARGET-space va into the container through the window
+// plan; 0 when no window covers it (mirror_view).
 static BOOL RunMirror(HANDLE device, SM_ATTACH_OUT* out, unsigned long long va,
                       BOOL doWrite, unsigned long long bench) {
-    const unsigned long long translated = TranslateVa(out, va);
+    const unsigned long long translated = TranslateVa(*out, va);
     if (translated == 0) {
         wprintf(L"translate: no window for slot %u\n", SmPml4Index(va));
         return FALSE;
@@ -142,7 +115,7 @@ static BOOL RunMirror(HANDLE device, SM_ATTACH_OUT* out, unsigned long long va,
 // VAD-less container (finding 5), so probe only addresses that are
 // almost certainly resident (e.g. image headers).
 static void ProbeWindow(const SM_ATTACH_OUT* out, unsigned long long va) {
-    const unsigned long long translated = TranslateVa(out, va);
+    const unsigned long long translated = TranslateVa(*out, va);
     if (translated == 0) {
         wprintf(L"probe: no window for slot %u\n", SmPml4Index(va));
         return;
@@ -160,6 +133,43 @@ static void ProbeWindow(const SM_ATTACH_OUT* out, unsigned long long va) {
     }
 }
 
+// Baseline: the same 8-byte stride pattern as BenchRead, but through
+// ReadProcessMemory on the ORIGINAL target va (no mirror involved) --
+// one command then yields both H1 numbers under identical residency.
+static void BenchRpm(ULONG pid, unsigned long long targetVa,
+                     unsigned long long iterations) {
+    const HANDLE process = OpenProcess(PROCESS_VM_READ, FALSE, pid);
+    if (process == NULL) {
+        wprintf(
+            L"bench-rpm: OpenProcess(%lu) failed: %lu (elevation "
+            L"mismatch with the target? run both from the same "
+            L"console level)\n",
+            pid, GetLastError());
+        return;
+    }
+    LARGE_INTEGER freq, t0, t1;
+    QueryPerformanceFrequency(&freq);
+    unsigned long long value = 0;
+    SIZE_T got = 0;
+    QueryPerformanceCounter(&t0);
+    for (unsigned long long i = 0; i < iterations; ++i) {
+        if (!ReadProcessMemory(
+                process,
+                (LPCVOID)(targetVa + (i & 0xF) * sizeof(unsigned long long)),
+                &value, sizeof(value), &got)) {
+            wprintf(L"bench-rpm: ReadProcessMemory failed at %llu: %lu\n", i,
+                    GetLastError());
+            CloseHandle(process);
+            return;
+        }
+    }
+    QueryPerformanceCounter(&t1);
+    wprintf(L"bench-rpm: %llu reads, %.2f ns/read\n", iterations,
+            (double)(t1.QuadPart - t0.QuadPart) * 1e9 / (double)freq.QuadPart /
+                (double)iterations);
+    CloseHandle(process);
+}
+
 // One launch's parameters, filled by wmain: keeps the function signatures
 // small and the flag parsing local to one place.
 struct RunOptions {
@@ -168,9 +178,11 @@ struct RunOptions {
     unsigned long long pinLength = 4096;
     unsigned long long warmupBytes = 0;  // >0: run the residency-audit IOCTL
     unsigned long long bench = 0;
+    unsigned long long benchRpm = 0;  // >0: ReadProcessMemory baseline (H1)
     unsigned long long probe = 0;
     bool write = false;
     bool hold = false;
+    unsigned long long holdMs = 0;  // >0: unattended --hold (soak script)
 };
 
 static BOOL AttachAndRun(const RunOptions& opt) {
@@ -207,6 +219,10 @@ static BOOL AttachAndRun(const RunOptions& opt) {
     if (out.TargetUserDtb != 0) {
         wprintf(L" (KVA shadow: user DTB is active for the target)\n");
     }
+    if (out.TargetImageBase != 0) {
+        wprintf(L" image : 0x%llx (target exe base, from the driver)\n",
+                out.TargetImageBase);
+    }
     for (unsigned i = 0; i < out.WindowCount && i < SM_USER_SLOT_COUNT; ++i) {
         const long long delta = ((long long)out.Windows[i].ContainerSlot -
                                  (long long)out.Windows[i].TargetSlot) *
@@ -225,6 +241,15 @@ static BOOL AttachAndRun(const RunOptions& opt) {
             RunMirror(device, &out, opt.va, opt.write, opt.bench);
             if (opt.probe != 0) {
                 ProbeWindow(&out, opt.probe);
+            } else if (out.TargetImageBase != 0) {
+                wprintf(L"probe: no --probe given, using the image base\n");
+                ProbeWindow(&out, out.TargetImageBase);
+            }
+            if (out.TargetPeb != 0) {
+                LdrWalkModules(out);
+            }
+            if (opt.benchRpm > 0) {
+                BenchRpm(opt.pid, opt.va, opt.benchRpm);
             }
         } else {
             wprintf(L"write build active but no va given: plan only\n");
@@ -238,6 +263,9 @@ static BOOL AttachAndRun(const RunOptions& opt) {
             L"mirror live exit/kill the target now, then press Enter "
             L"to detach\n");
         getchar();
+    } else if (opt.holdMs > 0) {
+        wprintf(L"mirror live for %llu ms (kill the target now)\n", opt.holdMs);
+        Sleep((DWORD)opt.holdMs);
     }
 
     DeviceIoControl(device, IOCTL_SM_DETACH, nullptr, 0, nullptr, 0, &returned,
@@ -269,15 +297,21 @@ int wmain(int argc, wchar_t** argv) {
             opt.pinLength = _wcstoui64(argv[++i], nullptr, 10);
         } else if (wcscmp(argv[i], L"--probe") == 0 && i + 1 < argc) {
             opt.probe = _wcstoui64(argv[++i], nullptr, 16);
+        } else if (wcscmp(argv[i], L"--bench-rpm") == 0 && i + 1 < argc) {
+            opt.benchRpm = _wcstoui64(argv[++i], nullptr, 10);
         } else if (wcscmp(argv[i], L"--hold") == 0) {
             opt.hold = true;
+        } else if (wcscmp(argv[i], L"--hold-ms") == 0 && i + 1 < argc) {
+            opt.holdMs = _wcstoui64(argv[++i], nullptr, 10);
+        } else {
+            wprintf(L"unknown flag: %s\n", argv[i]);
         }
     }
     if (opt.pid == 0) {
         wprintf(
             L"usage: container --pid <pid> [--va <hex-va>] [--write] "
-            L"[--bench N] [--len bytes] [--warmup bytes] [--probe <hex-va>] "
-            L"[--hold]\n");
+            L"[--bench N] [--bench-rpm N] [--len bytes] [--warmup bytes] "
+            L"[--probe <hex-va>] [--hold | --hold-ms N]\n");
         return 2;
     }
     return AttachAndRun(opt) ? 0 : 1;

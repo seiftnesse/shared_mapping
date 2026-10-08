@@ -28,17 +28,25 @@ $SymbolDir = [IO.Path]::GetFullPath($SymbolDir)
 $readobj = (Get-Command llvm-readobj -ErrorAction Stop).Source
 $pdbutil = (Get-Command llvm-pdbutil -ErrorAction Stop).Source
 
-# CodeView RSDS info: {GUID, age, pdb name}
+function Convert-Hex([long]$Value) { '0x{0:x}' -f $Value }
+
+# -match and return the first capture group, or fail with context.
+function Find-Capture([string]$Text, [string]$Pattern, [string]$What) {
+    if ($Text -notmatch $Pattern) {
+        Write-Error "cannot parse $What (expected /$Pattern/)"
+    }
+    return $Matches[1]
+}
+
+# --- CodeView RSDS: {GUID, age, pdb name} ---------------------------------
+
 $debugDir = & $readobj --coff-debug-directory $Image | Out-String
 if ($debugDir -notmatch 'PDBSignature:\s*0x53445352') {
     Write-Error "no RSDS CodeView record in $Image"
 }
-$debugDir -match 'PDBGUID:\s*\{([0-9A-Fa-f-]+)\}' | Out-Null
-$guid = $Matches[1]
-$debugDir -match 'PDBAge:\s*(\d+)' | Out-Null
-$age = $Matches[1]
-$debugDir -match 'PDBFileName:\s*(\S+\.pdb)' | Out-Null
-$pdbName = $Matches[1]
+$guid = Find-Capture $debugDir 'PDBGUID:\s*\{([0-9A-Fa-f-]+)\}' 'PDBGUID'
+$age = Find-Capture $debugDir 'PDBAge:\s*(\d+)' 'PDBAge'
+$pdbName = Find-Capture $debugDir 'PDBFileName:\s*(\S+\.pdb)' 'PDBFileName'
 
 $guidCompact = $guid -replace '-', ''
 $storeDir = Join-Path $SymbolDir "$pdbName\$guidCompact$age"
@@ -59,21 +67,48 @@ if (-not (Test-Path $pdb)) {
     Write-Host "==> using cached PDB"
 }
 
-$layoutDump = if ($SaveLayouts) {
-    Join-Path $storeDir "$([IO.Path]::GetFileNameWithoutExtension($pdbName)).layouts.txt"
+# --- one pdbutil pass for every type we need ------------------------------
+# A single pretty-print over a type alternation is far cheaper than one
+# run per type; slices per class are cut on the top-level header lines
+# ("struct _NAME [sizeof = N] {", never indented).
+
+$layoutTypes = @('_KPROCESS', '_MMPFN', '_EPROCESS', '_MMSUPPORT_FULL',
+    '_MMSUPPORT_SHARED')
+if ($SaveLayouts) {
+    # Documented PTE layouts, kept for human context only.
+    $layoutTypes += @('_MMPTE', '_MMPTE_HARDWARE')
+}
+$includeRegex = '^(' + ($layoutTypes -join '|') + ')$'
+
+$allLayouts = @(& $pdbutil pretty --classes --class-definitions=layout `
+        --include-types=$includeRegex $pdb 2>$null)
+if ($SaveLayouts) {
+    $layoutDump = Join-Path $storeDir `
+        "$([IO.Path]::GetFileNameWithoutExtension($pdbName)).layouts.txt"
+    $allLayouts | Add-Content -Path $layoutDump -Encoding utf8
 }
 
 function Get-ClassLayout([string]$TypeName) {
-    $dump = & $pdbutil pretty --classes --class-definitions=layout `
-        --include-types="^$TypeName`$" $pdb 2>$null
-    if ($SaveLayouts) {
-        $dump | Add-Content -Path $layoutDump -Encoding utf8
+    $slice = New-Object System.Collections.Generic.List[string]
+    $inside = $false
+    foreach ($line in $allLayouts) {
+        # Top-level class headers ("    struct _NAME [sizeof = N] {"):
+        # nested members print as "data +0x.." lines, never as headers.
+        if ($line -match '^\s*struct\s+(_\w+)\s*\[sizeof\s*=') {
+            if ($inside) { break }  # the next top-level class: done
+            $inside = ($Matches[1] -eq $TypeName)
+        }
+        if ($inside) { $slice.Add($line) }
     }
-    return @($dump)
+    if ($slice.Count -eq 0) {
+        Write-Error "$TypeName not found in the PDB layout"
+    }
+    return $slice
 }
 
 # Field offset inside a class layout dump: "data +0xNN [sizeof=..] Type Name".
-# Matching runs in this scope (a Where-Object scriptblock would hide $Matches).
+# Plain foreach on purpose: $Matches set inside a Where-Object scriptblock
+# would not reach this scope.
 function Get-FieldOffset([string[]]$Layout, [string]$TypeName, [string]$Field) {
     foreach ($line in $Layout) {
         if ($line -match "data \+0x([0-9A-Fa-f]+).*\b$Field\b") {
@@ -83,33 +118,32 @@ function Get-FieldOffset([string[]]$Layout, [string]$TypeName, [string]$Field) {
     Write-Error "$TypeName.$Field not found in the PDB layout"
 }
 
-# Struct size from the header line: "struct _X [sizeof = N] {"
+# Struct size from the header line: "struct _X [sizeof = N] {".
 function Get-StructSize([string[]]$Layout, [string]$TypeName) {
-    $line = $Layout | Where-Object { $_ -match "struct $TypeName \[sizeof = (\d+)\]" } |
-        Select-Object -First 1
-    if (-not $line) {
-        Write-Error "$TypeName size not found in the PDB layout"
+    foreach ($line in $Layout) {
+        if ($line -match "struct $TypeName \[sizeof = (\d+)\]") {
+            return [Convert]::ToInt64($Matches[1], 10)
+        }
     }
-    return [Convert]::ToInt64($Matches[1], 10)
+    Write-Error "$TypeName size not found in the PDB layout"
 }
 
-$kprocess = Get-ClassLayout "_KPROCESS"
-$mmpfn = Get-ClassLayout "_MMPFN"
-$eprocess = Get-ClassLayout "_EPROCESS"
-$mmFull = Get-ClassLayout "_MMSUPPORT_FULL"
-$mmShared = Get-ClassLayout "_MMSUPPORT_SHARED"
-foreach ($type in @("_MMPTE", "_MMPTE_HARDWARE")) {
-    Get-ClassLayout $type | Out-Null  # documented layouts, kept for context
-}
+$kprocess = Get-ClassLayout '_KPROCESS'
+$mmpfn = Get-ClassLayout '_MMPFN'
+$eprocess = Get-ClassLayout '_EPROCESS'
+$mmFull = Get-ClassLayout '_MMSUPPORT_FULL'
+$mmShared = Get-ClassLayout '_MMSUPPORT_SHARED'
 
-$dtbOff = Get-FieldOffset $kprocess "_KPROCESS" "DirectoryTableBase"
-$udtbOff = Get-FieldOffset $kprocess "_KPROCESS" "UserDirectoryTableBase"
-$kprocSize = Get-StructSize $kprocess "_KPROCESS"
-$pfnElem = Get-StructSize $mmpfn "_MMPFN"
-$pfnShareOff = Get-FieldOffset $mmpfn "_MMPFN" "u2"
-$vmOff = Get-FieldOffset $eprocess "_EPROCESS" "Vm"
-$mmSharedOff = Get-FieldOffset $mmFull "_MMSUPPORT_FULL" "Shared"
-$shadowOff = Get-FieldOffset $mmShared "_MMSUPPORT_SHARED" "ShadowMapping"
+$dtbOff = Get-FieldOffset $kprocess '_KPROCESS' 'DirectoryTableBase'
+$udtbOff = Get-FieldOffset $kprocess '_KPROCESS' 'UserDirectoryTableBase'
+$kprocSize = Get-StructSize $kprocess '_KPROCESS'
+$pfnElem = Get-StructSize $mmpfn '_MMPFN'
+$pfnShareOff = Get-FieldOffset $mmpfn '_MMPFN' 'u2'
+$vmOff = Get-FieldOffset $eprocess '_EPROCESS' 'Vm'
+$sbaOff = Get-FieldOffset $eprocess '_EPROCESS' 'SectionBaseAddress'
+$pebOff = Get-FieldOffset $eprocess '_EPROCESS' 'Peb'
+$mmSharedOff = Get-FieldOffset $mmFull '_MMSUPPORT_FULL' 'Shared'
+$shadowOff = Get-FieldOffset $mmShared '_MMSUPPORT_SHARED' 'ShadowMapping'
 
 # MmPfnDatabase pointer variable RVA: publics record "addr = SEGM:OFF",
 # both DECIMAL (calibrated on MiCheckProcessShadow: seg 8 + off 63552 ==
@@ -147,19 +181,27 @@ $imageBuild = $Matches[3]
 $ubr = $Matches[4]
 
 Write-Host "`n==> extracted offsets:" -ForegroundColor Cyan
-Write-Host "    _KPROCESS.DirectoryTableBase     +0x$($dtbOff.ToString('x'))"
-Write-Host "    _KPROCESS.UserDirectoryTableBase +0x$($udtbOff.ToString('x'))"
-Write-Host "    sizeof(_KPROCESS)                0x$($kprocSize.ToString('x'))"
-Write-Host "    sizeof(_MMPFN)                   0x$($pfnElem.ToString('x'))"
-Write-Host "    _MMPFN.u2 (share count)          +0x$($pfnShareOff.ToString('x'))"
-Write-Host "    _EPROCESS.Vm                     +0x$($vmOff.ToString('x'))"
-Write-Host "    _MMSUPPORT_FULL.Shared           +0x$($mmSharedOff.ToString('x'))"
-Write-Host "    _MMSUPPORT_SHARED.ShadowMapping  +0x$($shadowOff.ToString('x'))"
-Write-Host "    MmPfnDatabase RVA                0x$($pfndbRva.ToString('x')) (seg $segment off $segOff)"
+Write-Host "    _KPROCESS.DirectoryTableBase     +$(Convert-Hex $dtbOff)"
+Write-Host "    _KPROCESS.UserDirectoryTableBase +$(Convert-Hex $udtbOff)"
+Write-Host "    sizeof(_KPROCESS)                $(Convert-Hex $kprocSize)"
+Write-Host "    sizeof(_MMPFN)                   $(Convert-Hex $pfnElem)"
+Write-Host "    _MMPFN.u2 (share count)          +$(Convert-Hex $pfnShareOff)"
+Write-Host "    _EPROCESS.Vm                     +$(Convert-Hex $vmOff)"
+Write-Host "    _MMSUPPORT_FULL.Shared           +$(Convert-Hex $mmSharedOff)"
+Write-Host "    _MMSUPPORT_SHARED.ShadowMapping  +$(Convert-Hex $shadowOff)"
+Write-Host "    _EPROCESS.SectionBaseAddress     +$(Convert-Hex $sbaOff)"
+Write-Host "    _EPROCESS.Peb                    +$(Convert-Hex $pebOff)"
+Write-Host "    MmPfnDatabase RVA                $(Convert-Hex $pfndbRva) (seg $segment off $segOff)"
 
 # os_build is the TARGET VM's RtlGetVersion build number (registry), not
 # the image build: Win10 22H2 runs the 19041 image with os_build 19045.
-$row = "<os_build>,$ubr,$imageBuild.$ubr,0x$($dtbOff.ToString('x')),0x$($udtbOff.ToString('x')),0x$($kprocSize.ToString('x')),0x$($pfnElem.ToString('x')),0x$($pfnShareOff.ToString('x')),$shareShift,0x$($pfndbRva.ToString('x')),0x$($vmOff.ToString('x')),0x$($mmSharedOff.ToString('x')),0x$($shadowOff.ToString('x'))"
+$row = (@(
+        '<os_build>', $ubr, "$imageBuild.$ubr",
+        (Convert-Hex $dtbOff), (Convert-Hex $udtbOff), (Convert-Hex $kprocSize),
+        (Convert-Hex $pfnElem), (Convert-Hex $pfnShareOff), $shareShift,
+        (Convert-Hex $pfndbRva), (Convert-Hex $vmOff), (Convert-Hex $mmSharedOff),
+        (Convert-Hex $shadowOff), (Convert-Hex $sbaOff), (Convert-Hex $pebOff)
+    ) -join ',')
 Write-Host "    image build $imageBuild; replace <os_build> with the VM's" -ForegroundColor Yellow
 Write-Host "    RtlGetVersion build (19045 on a 22H2 install with this image)" -ForegroundColor Yellow
 Write-Host "`n==> append to SharedMapping/SourceFiles/common/kernel_offsets.csv:" -ForegroundColor Yellow

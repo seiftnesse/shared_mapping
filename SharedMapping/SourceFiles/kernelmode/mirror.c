@@ -108,12 +108,18 @@ static VOID WatchdogThread(PVOID Context) {
     KWAIT_BLOCK waitBlock;
     const NTSTATUS st = KeWaitForMultipleObjects(
         2, waits, WaitAny, Executive, KernelMode, FALSE, &due, &waitBlock);
-    if (st == STATUS_WAIT_1) {
-        SM_LOG("watchdog: client died detaching");
-    } else {
-        SM_LOG("watchdog: detaching (exposure limit %us)", SM_WATCHDOG_SECONDS);
+    // The stop event (client detach) or the exit notify usually wins the
+    // race: waking up over an already-down mirror must stay silent --
+    // unlocked read, same tolerance as SmOnProcessNotify.
+    if (g_Mirror.Attached) {
+        if (st == STATUS_WAIT_1) {
+            SM_LOG("watchdog: client died detaching");
+        } else {
+            SM_LOG("watchdog: detaching (exposure limit %us)",
+                   SM_WATCHDOG_SECONDS);
+        }
+        SmMirrorDetach();
     }
-    SmMirrorDetach();
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -375,6 +381,8 @@ NTSTATUS SmMirrorAttach(const SM_ATTACH_IN* In, SM_ATTACH_OUT* Out) {
         }
     }
     Out->Flags = SM_FLAG_DRY_RUN;
+    Out->TargetImageBase = SmReadTargetImageBase(target, g_Offsets);
+    Out->TargetPeb = SmReadTargetPeb(target, g_Offsets);
 
 #if SM_ENABLE_WRITE
     // Refresh the captured entries against the live tables BEFORE the

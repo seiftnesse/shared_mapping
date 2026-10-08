@@ -14,4 +14,12 @@ VOID SmReleaseTargetProcess(PEPROCESS Process);
 VOID SmReadTargetDtbs(PEPROCESS Process, const SM_KERNEL_OFFSETS* Offsets,
                       UINT64* KernelDtb, UINT64* UserDtb);
 
+// Best-effort exe image base (EPROCESS.SectionBaseAddress): 0 when the
+// offset table lacks the field or the read faults.
+UINT64 SmReadTargetImageBase(PEPROCESS Process,
+                             const SM_KERNEL_OFFSETS* Offsets);
+
+// Best-effort PEB va (EPROCESS.Peb), the module-walk entry point.
+UINT64 SmReadTargetPeb(PEPROCESS Process, const SM_KERNEL_OFFSETS* Offsets);
+
 #endif  // TARGET_PROCESS_H_

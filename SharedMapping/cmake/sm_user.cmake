@@ -1,6 +1,7 @@
-add_executable(container ${SF}/usermode/container/main.cpp)
-nice_target_sources(container ${SF} PRIVATE
-    usermode/container/main.cpp
+add_executable(container
+    ${SF}/usermode/container/ldr_walk.cpp
+    ${SF}/usermode/container/main.cpp
+    ${SF}/usermode/container/mirror_view.cpp
 )
 target_include_directories(container PRIVATE ${SF})
 

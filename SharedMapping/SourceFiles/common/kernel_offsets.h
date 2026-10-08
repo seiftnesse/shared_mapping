@@ -16,10 +16,10 @@ typedef struct SM_KERNEL_OFFSETS {
     uint32_t MmpfnShareCountOffset;
     // The share count occupies the bits at and above this shift within the
     // packed field (bits 61:0 => shift 0 on the 19041 line, per
-    // MiLockAndIncrementShareCount in IDA).
+    // MiLockAndIncrementShareCount).
     uint32_t MmpfnShareCountShift;
-    // RVA of the MmPfnDatabase pointer variable (ntoskrnl PDB publics;
-    // PDB section map compresses away the zero-size Pad sections).
+    // RVA of the MmPfnDatabase pointer variable
+    // (PDB section map compresses away the zero-size Pad sections).
     uint32_t MmPfnDatabasePointerRva;
     // Shadow-PML4 chain used by the KPTI dual-write: _EPROCESS.Vm
     // (_MMSUPPORT_FULL) -> .Shared (_MMSUPPORT_SHARED) -> .ShadowMapping
@@ -28,6 +28,12 @@ typedef struct SM_KERNEL_OFFSETS {
     uint32_t VmOffset;
     uint32_t MmSupportSharedOffset;
     uint32_t ShadowMappingOffset;
+    // _EPROCESS.SectionBaseAddress: the exe image base, handed to the
+    // client for probing image headers through the mirror
+    uint32_t SectionBaseAddressOffset;
+    // _EPROCESS.Peb: the target PEB va, the entry point of the client's
+    // module walk.
+    uint32_t PebOffset;
 } SM_KERNEL_OFFSETS;
 
 #include "kernel_offsets_table.gen.h"
